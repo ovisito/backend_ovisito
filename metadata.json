@@ -1,0 +1,8 @@
+{
+  "name": "Ovisito Backend API",
+  "description": "REST API service and interactive developer portal for Ovisito Aceh tourism super-app covering Destinasi, Kuliner, Hotel, Event, Transport, Rental, MICE, Marketplace, and Bahasa Aceh.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
