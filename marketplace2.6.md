@@ -1,488 +1,385 @@
-# Marketplace API — Ovisito
+# Merchant API Documentation — Ovisito
 
-Dokumentasi endpoint marketplace souvenir (multi-database) untuk platform Ovisito.
+Dokumentasi lengkap Merchant API untuk integrasi multi-platform (Web, Android, iOS).
 
 **Versi:** 2.6 · **Terakhir diupdate:** 2026-10-08
 
-**Base URL API:** https://api.ovisito.com
+**Base URL API:** https://api.ovisito.com/api/v2
 
-**Base URL Frontend Merchant:** https://merchant.ovisito.com
+**Web Dashboard:** https://merchant.ovisito.com
 
 ## Daftar Isi
 
 1. Overview
-2. Arsitektur Multi-Service
-3. Database Connection
-4. Response Format
-5. Authentication & Middleware
-6. Public Endpoints
-7. Customer Endpoints
-8. Merchant Endpoints
-9. Admin Endpoints
-10. Payment Integration (Flip)
-11. Shipping Integration
-12. Order Lifecycle
-13. Notification
-14. Models Reference
-15. Constants Reference
-16. Roadmap & Known Issues
+2. Authentication
+3. Common Conventions
+4. Error Handling
+5. Endpoints — Auth
+6. Endpoints — Profile
+7. Endpoints — Dashboard
+8. Endpoints — Store
+9. Endpoints — Categories (Read-only)
+10. Endpoints — Products
+11. Endpoints — Orders
+12. Endpoints — Transactions & Withdraw
+13. Order Lifecycle & Business Rules
+14. Constants Reference
+15. Integration Guide per Platform
+16. Sample Flows (End-to-End)
 17. Changelog
-18. Referensi
 
 ## 1. Overview
 
-Modul marketplace menangani produk souvenir, toko, kategori, order, pembayaran (Flip), shipping, dan review.
+### 1.1 Role & Akses
 
-### Akses & Role
-
-| Role | Auth | Endpoint Prefix |
+| Role | Header Tambahan | Token |
 |---|---|---|
-| Public | client.auth | /api/v2/public/souvenir/* |
-| Customer | client.auth + auth:sanctum / auth:customer | /api/v2/customer/* |
-| Merchant | client.auth + auth:merchant_api | /api/v2/merchant/* |
-| Admin | auth:admin_api + admin | /api/v2/admin/marketplace/* |
-| Webhook | Signature verification | /api/webhook/* |
+| Public (browsing) | X-Client-ID, X-Client-Secret | Tidak perlu |
+| Merchant | X-Client-ID, X-Client-Secret + Authorization: Bearer <token> | Sanctum token |
 
-## 2. Arsitektur Multi-Service
+Dokumen ini fokus ke Merchant API.
 
-Platform Ovisito terdiri dari 9 layanan dengan database terpisah, disatukan oleh CentralBooking aggregator.
+### 1.2 Base URL
+
+| Environment | URL |
+|---|---|
+| Production | https://api.ovisito.com/api/v2 |
+| Staging | https://staging-api.ovisito.com/api/v2 |
+| Local | http://localhost:8000/api/v2 |
+
+### 1.3 Client Credentials
+
+Setiap request (kecuali login admin) wajib sertakan:
 
 ```text
-Modul (DB terpisah)              → CentralBooking (payment DB)
-├── hotel (wisata_aceh)          → central_bookings
-├── destinasi (wisata_aceh)      → central_bookings
-├── tour (wisata_aceh)           → central_bookings
-├── kuliner (kuliner_aceh)       → central_bookings
-├── rental (aceh_sewa)           → central_bookings
-├── event (events)               → central_bookings
-├── mice (mice)                  → central_bookings
-├── transport (aceh_transport)   → central_bookings
-└── marketplace (souvenir_sql)   → central_bookings
+X-Client-ID: client_web
+X-Client-Secret: <secret_dari_backend_team>
+Accept: application/json
 ```
 
-Satu payment gateway (Flip) untuk semua layanan. Setiap booking tercatat di `central_bookings` sebagai aggregator.
+**Catatan untuk mobile:**
 
-### PayableBooking Interface
+- JANGAN hardcode `client_secret` di source code mobile (bisa di-reverse engineer)
+- Gunakan environment variable atau secure config (Android: `local.properties`; iOS: `xcconfig`)
+- Idealnya: mobile dapat token via backend proxy atau OAuth flow terpisah (roadmap v2.7)
 
-Setiap model yang bisa dibayar wajib implement `App\Contracts\PayableBooking`:
+### 1.4 Content-Type
 
-```php
-interface PayableBooking
-{
-    public function getAmount(): float;
-    public function getCustomerName(): string;
-    public function getCustomerEmail(): ?string;
-    public function getCustomerPhone(): ?string;
-    public function getBookingCode(): string;
-    public function getServiceType(): string;
-    public function isPaid(): bool;
-    public function markAsPaid(?float $amount = null): void;
-    public function getCustomerId(): ?int;
-    public function getStartDate(): ?string;
-    public function getEndDate(): ?string;
-    public function getKey();
-}
+| Endpoint | Content-Type |
+|---|---|
+| Login, register, forgot, reset, logout | application/json |
+| Profile update | application/json |
+| Store create/update | multipart/form-data |
+| Product create/update | multipart/form-data |
+| Product stock/toggle | application/json |
+| Order status/ship | application/json atau application/x-www-form-urlencoded |
+| Withdraw | application/json |
+
+## 2. Authentication
+
+### 2.1 Flow Overview
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│  1. POST /merchant/register                                 │
+│     → Merchant dibuat (status=pending, email belum verify)  │
+│     → Email verifikasi terkirim                             │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│  2. Klik link verifikasi di email                           │
+│     GET /merchant/verify-email/{uuid}?hash=<sha1_email>     │
+│     → email_verified_at ter-set                             │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│  3. POST /merchant/login                                    │
+│     → Dapat Sanctum token                                   │
+│     → Simpan di secure storage                              │
+│       (Web: session, Android: EncryptedSharedPreferences,   │
+│        iOS: Keychain)                                       │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│  4. Akses semua endpoint merchant                           │
+│     Authorization: Bearer <token>                           │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│  5. POST /merchant/logout                                   │
+│     → Token di-revoke                                       │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-## 3. Database Connection
+### 2.2 Token Management
 
-Modul marketplace menggunakan 3 koneksi database terpisah:
+| Aspek | Nilai |
+|---|---|
+| Tipe | Laravel Sanctum Personal Access Token |
+| Format | `{id}\|{token}` — contoh: `123\|abcdefg...` |
+| Berlaku | Selamanya (tidak ada expiry otomatis) |
+| Revoke | Via `POST /merchant/logout` |
+| Storage (Web) | Server-side session (bukan localStorage) |
+| Storage (Android) | EncryptedSharedPreferences |
+| Storage (iOS) | Keychain |
+| Header | `Authorization: Bearer {token}` |
 
-| Connection | Fungsi | Model |
-|---|---|---|
-| souvenir_sql | Produk, kategori, order, review | Semua model App\Models\Marketplace\* |
-| payment | Central booking, Flip transaction | CentralBooking, FlipTransaction, MerchantWithdrawal |
-| user | User, Merchant, Admin, ClientApp | User, Merchant, ClientApp |
+> ⚠️ **Mobile security:**
+>
+> - Jangan simpan token di plain SharedPreferences (Android) atau UserDefaults (iOS)
+> - Jangan log token ke console / crash report
+> - Rotate token jika user ganti password — sudah otomatis di backend (`changePassword` revoke semua token lain)
 
-### Cara Deklarasi
+## 3. Common Conventions
 
-```php
-class SouvenirOrder extends Model
-{
-    protected $connection = 'souvenir_sql';
-    protected $table      = 'souvenir_orders';
-}
-```
+### 3.1 Response Format — Sukses
 
-### Relasi Cross-Database
-
-Laravel handle otomatis:
-
-```php
-// SouvenirOrder → User (cross-DB)
-public function user()
-{
-    return $this->belongsTo(User::class, 'user_uuid', 'uuid');
-}
-```
-
-> ⚠️ **Catatan penting:** Jangan pakai `->on('connection')` untuk query Eloquent. Gunakan `$connection` property di model — biar konsisten dan tidak bentrok.
-
-### Tabel Marketplace
-
-| Tabel | PK | Route Key |
-|---|---|---|
-| souvenir_products | UUID | slug |
-| souvenir_categories | UUID | slug |
-| souvenir_stores | UUID | slug |
-| souvenir_store_categories | UUID | id |
-| souvenir_orders | UUID | id |
-| souvenir_order_items | UUID | id |
-| souvenir_reviews | UUID | id |
-| souvenir_shipping_methods | UUID | id |
-| souvenir_shipping_trackings | UUID | id |
-
-### Cross-Service FK
-
-| Dari | Ke | Tipe |
-|---|---|---|
-| souvenir_orders.user_uuid | users.uuid | char(36) |
-| souvenir_orders.merchant_uuid | merchants.uuid | char(36) |
-| souvenir_orders.id | souvenir_order_items.order_uuid | char(36) |
-| souvenir_order_items.product_uuid | souvenir_products.id | char(36) |
-| souvenir_shipping_trackings.order_uuid | souvenir_orders.id | char(36) |
-| souvenir_reviews.product_uuid | souvenir_products.id | char(36) |
-| central_bookings.user_id | users.id | int unsigned |
-
-> ⚠️ MySQL tidak support FK lintas-database. Relasi di-enforce di app-layer via Eloquent.
-
-## 4. Response Format
-
-### Sukses
+Single object:
 
 ```json
 {
   "status": true,
   "message": "Optional message",
-  "data": { }
+  "data": {
+    "id": "...",
+    "name": "..."
+  }
 }
 ```
 
-`data` dapat berupa object, array, atau null.
-
-### Error
-
-```json
-{
-  "status": false,
-  "message": "Pesan error",
-  "errors": { "field": ["..."] }
-}
-```
-
-### HTTP Status
-
-| Code | Arti |
-|---|---|
-| 200 | OK |
-| 201 | Created |
-| 400 | Bad Request |
-| 401 | Unauthorized |
-| 403 | Forbidden |
-| 404 | Not Found |
-| 422 | Validation Error |
-| 500 | Internal Server Error |
-| 502 | Bad Gateway (upstream error, mis. KiriminAja) |
-
-### Pagination Meta
-
-Standar v2.6: `data` array + `meta` object (bukan paginator nested).
+List / paginated:
 
 ```json
 {
   "status": true,
   "data": [ ],
-  "meta": { "current_page": 1, "last_page": 5, "per_page": 12, "total": 60 }
+  "meta": {
+    "current_page": 1,
+    "last_page": 5,
+    "per_page": 15,
+    "total": 60
+  }
 }
 ```
 
-> ⚠️ **Breaking change v2.6:** Semua endpoint list (order merchant, transaksi, withdrawal, product merchant) sekarang konsisten pakai format di atas. Sebelumnya ada yang return paginator object langsung.
+### 3.2 Response Format — Error
 
-## 5. Authentication & Middleware
+```json
+{
+  "status": false,
+  "message": "Pesan error yang jelas",
+  "errors": {
+    "field_name": ["Pesan error field"]
+  }
+}
+```
 
-### Middleware Registry
+`errors` hanya muncul untuk 422 Validation Error. Endpoint lain hanya punya `status` + `message`.
 
-| Middleware | Header | Fungsi |
+### 3.3 HTTP Status Codes
+
+| Code | Arti | Kapan |
 |---|---|---|
-| client.auth | X-Client-ID, X-Client-Secret | Identifikasi platform/app |
-| auth:sanctum | Authorization: Bearer <token> | Customer (marketplace order, payment) |
-| auth:customer | Authorization: Bearer <token> | Customer (support, transport) |
-| auth:merchant_api | Authorization: Bearer <token> | Authenticated merchant |
-| auth:admin_api | Authorization: Bearer <token> | Authenticated admin |
-| admin | — | Cek role admin |
-| throttle:120,1 | — | Rate limit 120 req/menit |
+| 200 | OK | Request sukses |
+| 201 | Created | Resource baru dibuat (register, store, product) |
+| 400 | Bad Request | Request tidak valid (mis. merchant sudah punya toko) |
+| 401 | Unauthorized | Token tidak ada / invalid / expired |
+| 403 | Forbidden | Token valid tapi tidak punya akses (mis. email belum verify) |
+| 404 | Not Found | Resource tidak ditemukan |
+| 422 | Validation Error | Body request tidak lulus validasi |
+| 429 | Too Many Requests | Rate limit terlampaui |
+| 500 | Internal Server Error | Bug di backend |
+| 502 | Bad Gateway | Upstream error (mis. KiriminAja, Flip timeout) |
 
-### ⚠️ Perbedaan Guard Customer
+### 3.4 Pagination
 
-Ada dua guard berbeda untuk customer:
+Query parameters:
 
-- `auth:sanctum` — untuk marketplace (`/customer/orders/*`, `/customer/payment/*`)
-- `auth:customer` — untuk support tickets & transport bookings
-
-Konsisten dengan route masing-masing. Jangan tertukar.
-
-### Client Auth
-
-Semua endpoint `/api/v2/public/*`, `/api/v2/customer/*`, `/api/v2/merchant/*` wajib sertakan:
-
-```text
-X-Client-ID: client_web
-X-Client-Secret: <secret>
-```
-
-Client credentials didaftarkan di tabel `client_apps` (connection `user`).
-
-### Merchant Auth Flow
-
-```text
-POST /api/v2/merchant/register
-   ↓
-POST /api/v2/merchant/login         → dapat token Sanctum
-   ↓
-Authorization: Bearer <token>       → untuk semua endpoint merchant
-   ↓
-POST /api/v2/merchant/logout        → revoke token
-```
-
-## 6. Public Endpoints
-
-**Base:** `/api/v2/public/souvenir` · **Middleware:** `client.auth`, `throttle:120,1` · **Auth User:** tidak perlu
-
-### 6.1 Products
-
-#### GET /products
-
-| Param | Tipe | Default | Deskripsi |
+| Param | Tipe | Default | Max |
 |---|---|---|---|
-| search | string | — | Cari nama & deskripsi |
-| category | string | — | Slug atau UUID kategori (auto-include children) |
-| merchant_uuid | uuid | — | Filter per merchant |
-| featured | bool | false | Hanya produk unggulan |
-| min_price / max_price | numeric | — | Range harga |
-| in_stock | bool | false | Hanya yang ada stok |
-| sort | enum | latest | latest / price_asc / price_desc / popular |
-| per_page | int | 12 | Max 60 |
 | page | int | 1 | — |
+| per_page | int | 15 | 50 (order/product), 60 (store) |
 
 Response:
 
 ```json
 {
   "status": true,
-  "data": [
-    {
-      "id": "uuid",
-      "name": "Kopi Aceh Gayo",
-      "slug": "kopi-aceh-gayo",
-      "description": "...",
-      "price": "50000.00",
-      "discount_price": "40000.00",
-      "final_price": 40000,
-      "stock": 100,
-      "weight": "250.00",
-      "images": ["souvenir/products/..."],
-      "is_active": true,
-      "featured": false,
-      "views": 42,
-      "sku": "SKU-ABCD1234",
-      "category": { "id": "...", "name": "Minuman", "slug": "minuman" },
-      "store": { "id": "...", "name": "Toko Kopi Aceh", "slug": "toko-kopi-aceh" },
-      "merchant": { "uuid": "...", "name": "Merchant Name" }
-    }
-  ],
-  "meta": { "current_page": 1, "last_page": 5, "per_page": 12, "total": 60 }
+  "data": [],
+  "meta": {
+    "current_page": 1,
+    "last_page": 5,
+    "per_page": 15,
+    "total": 60
+  }
 }
 ```
 
-> ⭐ **Baru di v2.6:** field `final_price` (float). FE tidak perlu hitung manual: kalau `discount_price < price`, pakai `discount_price`, else `price`.
+Cara build URL halaman berikutnya:
 
-#### GET /products/{slug}
+```text
+GET /merchant/souvenir/orders?page=2&per_page=15
+```
 
-Detail produk + reviews (10) + related (8). Increment `views` otomatis.
+### 3.5 Format Data
 
-#### GET /featured
-
-Query: `limit` (default 8, max 24).
-
-### 6.2 Categories
-
-#### GET /categories
-
-| Param | Default | Deskripsi |
+| Data | Format | Contoh |
 |---|---|---|
-| with_children | true | Include sub-kategori |
-| only_parents | true | Hanya kategori root |
+| Tanggal-waktu | ISO 8601 UTC | 2026-10-08T10:30:00.000000Z |
+| Tanggal | YYYY-MM-DD | 2026-10-08 |
+| Jam | HH:MM | 08:30 |
+| Uang | String decimal | "50000.00" |
+| Uang (formatted) | String Rupiah | "Rp 50.000" |
+| Boolean | true / false | true |
+| ID | UUID v4 (36 char) | 01a0e882-b4fe-737c-... |
+| Slug | kebab-case | kopi-aceh-gayo |
 
-#### GET /categories/{slug}
+### 3.6 Rate Limiting
 
-Auto-include children via `getDescendantIds()` — BFS, tidak dibatasi 2 level (update v2.6).
+| Endpoint | Limit |
+|---|---|
+| Semua endpoint | 120 req/menit (default) |
+| POST /merchant/login | 5 req/menit |
+| POST /merchant/register | 10 req/menit |
+| POST /merchant/forgot-password | 3 req/menit |
+| POST /merchant/reset-password | 5 req/menit |
+| POST /merchant/withdraw | 10 req/menit |
+| PUT /merchant/souvenir/orders/{id}/status | 60 req/menit |
+| POST /merchant/souvenir/orders/{id}/ship | 60 req/menit |
 
-### 6.3 Stores
-
-```text
-GET /stores         → list store (search, merchant_uuid, kabupaten_id, is_physical, per_page)
-GET /stores/{slug}  → detail store + 12 produk terbaru
-```
-
-### 6.4 Shipping Methods
-
-```text
-GET  /shipping-methods
-POST /shipping-methods/calculate    → body: { weight, method_id }
-```
-
-## 7. Customer Endpoints
-
-**Base:** `/api/v2/customer` · **Middleware:** `client.auth` + `auth:sanctum`
-
-### 7.1 Orders
-
-#### POST /orders
-
-Request Body:
+Response saat rate limit terlampaui:
 
 ```json
+HTTP 429
 {
-  "merchant_uuid": "uuid",
-  "items": [ { "product_uuid": "uuid", "quantity": 2 } ],
-  "shipping_address": {
-    "name": "Budi",
-    "phone": "628123456789",
-    "address": "Jl. ...",
-    "city": "Banda Aceh",
-    "postal_code": "23116"
-  },
-  "shipping_cost": 15000,
-  "courier": "jne"
+  "status": false,
+  "message": "Too Many Attempts."
 }
 ```
 
-Business Rules:
+## 4. Error Handling
 
-- Satu order = satu merchant
-- Stock di-decrement atomic (`lockForUpdate`)
-- Harga pakai `final_price` (discount jika ada)
-- Status awal: `pending`, payment: `unpaid`
-- Auto-generate `order_number`: `SO-YYYYMMDD-XXXXXXXX`
-- ⭐ Auto-trigger `PaymentService::processPayment()` → customer langsung dapat `payment_url`
+### 4.1 Pola Error yang Konsisten
 
-> ⚠️ **Catatan `shipping_address.phone`:** WAJIB format `628xxx` — dipakai sebagai target WA notif customer. Kalau `08xxx`, service auto-normalize ke `628xxx`.
-
-Response (201):
+Semua error dari backend menggunakan format:
 
 ```json
 {
-  "status": true,
-  "message": "Pesanan berhasil dibuat. Silakan lanjut ke pembayaran.",
-  "data": {
-    "order": {
-      "id": "uuid",
-      "order_number": "SO-20261008-XXXXXXXX",
-      "total_amount": "135000.00",
-      "shipping_cost": "15000.00",
-      "discount_total": "0.00",
-      "status": "pending",
-      "payment_status": "unpaid",
-      "flip_bill_id": "362xxx",
-      "shipping_address": { },
-      "items": [ ],
-      "ordered_at": "2026-10-08T10:30:00.000000Z"
-    },
-    "payment": {
-      "next_step": "POST /api/v2/customer/payment/process",
-      "booking_type": "marketplace",
-      "booking_id": "SO-20261008-XXXXXXXX",
-      "payment_url": "https://flip.id/pwf-sandbox/..."
-    }
+  "status": false,
+  "message": "Pesan error"
+}
+```
+
+### 4.2 Error Spesifik per Status Code
+
+**401 — Token invalid / expired:**
+
+```json
+{
+  "status": false,
+  "message": "Unauthenticated. Silakan login terlebih dahulu."
+}
+```
+
+Aksi di client: hapus token yang tersimpan, redirect ke halaman login.
+
+**403 — Email belum verify:**
+
+```json
+{
+  "status": false,
+  "message": "Silakan verifikasi email Anda terlebih dahulu.",
+  "data": { "code": "EMAIL_NOT_VERIFIED" }
+}
+```
+
+Aksi di client: redirect ke halaman verifikasi email / tampilkan banner.
+
+**404 — Order / product / store tidak ditemukan:**
+
+```json
+{
+  "status": false,
+  "message": "Pesanan tidak ditemukan."
+}
+```
+
+**422 — Validation error:**
+
+```json
+{
+  "status": false,
+  "message": "Validasi gagal.",
+  "errors": {
+    "email": ["Email sudah terdaftar."],
+    "phone": ["Nomor telepon sudah terdaftar."]
   }
 }
 ```
 
-Flow otomatis setelah create order:
+Aksi di client: tampilkan error di field masing-masing.
 
-```text
-1. SouvenirOrder dibuat (pending, flip_bill_id=null)
-2. Observer::created() → log saja (skip notif)
-3. AUTO trigger PaymentService::processPayment()
-4. Flip API → bill_id + payment_url
-5. Set flip_bill_id di order
-6. Observer::updated() detect flip_bill_id changed
-7. MarketplaceNotificationService::orderCreated($order, $paymentUrl)
-8. 📧 Email "Pesanan Diterima + 💳 Bayar Sekarang →"
-9. 📱 WA "Pesanan Diterima + Link Bayar"
-10. Response 201
-```
-
-**Fallback:** Kalau auto-payment gagal, order tetap dibuat + notif tetap dikirim tanpa `payment_url`.
-
-#### GET /orders
-
-List order user. Filter: `status`, `per_page` (max 50).
-
-#### GET /orders/{order_number}
-
-Detail order + `items.product` + `merchant` + `shipping_trackings`.
-
-#### POST /orders/{order_number}/cancel
-
-Body opsional: `{ "reason": "..." }`. Hanya boleh cancel kalau status `pending`, `paid`, atau `processing`. Stock otomatis dikembalikan.
-
-#### GET /orders/{order_number}/track
-
-Response: `order_number`, `status`, `status_label`, `courier`, `tracking_number`, `history`.
-
-### 7.2 Payment
-
-**Base:** `/api/v2/customer/payment`
-
-#### POST /process
-
-Request Body:
+**500 — Server error:**
 
 ```json
 {
-  "booking_type": "marketplace",
-  "booking_id": "SO-20261008-XXXXXXXX",
-  "payment_method": "qris",
-  "payment_channel": null
+  "status": false,
+  "message": "Terjadi kesalahan pada server."
 }
 ```
 
-Response:
+Aksi di client: tampilkan pesan generik + tombol retry.
+
+**502 — Upstream error:**
 
 ```json
 {
-  "status": true,
-  "message": "Pembayaran berhasil diproses. Silakan selesaikan pembayaran.",
-  "data": {
-    "booking_code": "SO-20261008-XXXXXXXX",
-    "booking_type": "marketplace",
-    "amount": "135000.00",
-    "status": "pending",
-    "payment_url": "https://flip.id/pwf-sandbox/...",
-    "qr_code": "data:image/png;base64,...",
-    "flip_bill_id": "362438"
-  }
+  "status": false,
+  "message": "Gagal membuat pengiriman via KiriminAja."
 }
 ```
 
-Idempotent — kalau ada bill aktif belum expired, reuse bill lama. Endpoint ini opsional untuk retry — auto-trigger dari `POST /customer/orders` sudah handle.
+### 4.3 Handling per Platform
 
-#### GET /qr/{bookingCode}
+**Web (Laravel Blade):**
 
-#### GET /status/{bookingCode}
+```php
+$response = Http::withToken($token)->get($url);
 
-## 8. Merchant Endpoints
+if ($response->status() === 401) {
+    Session::forget('merchant_token');
+    return redirect()->route('merchant.login');
+}
+```
 
-**Base:** `/api/v2/merchant` · **Middleware:** `client.auth` + `auth:merchant_api` + `throttle:120,1`
+**Android (Kotlin + Retrofit):**
 
-### 8.1 Auth
+```kotlin
+val response = api.getOrders()
+if (response.code() == 401) {
+    authRepository.clearToken()
+    navigateToLogin()
+}
+```
 
-**Base:** `/api/v2/merchant` · **Middleware:** `client.auth` + `throttle:120,1` (public, tanpa auth)
+**iOS (Swift + URLSession):**
 
-#### POST /register
+```swift
+if response.statusCode == 401 {
+    KeychainService.deleteToken()
+    navigateToLogin()
+}
+```
 
-Request Body:
+## 5. Endpoints — Auth
+
+### 5.1 POST /merchant/register
+
+**Deskripsi:** Registrasi merchant baru.
+
+**Auth:** tidak perlu token · **Rate limit:** 10 req/menit · **Content-Type:** application/json
+
+Request body:
 
 ```json
 {
@@ -493,33 +390,153 @@ Request Body:
   "phone": "081234567890",
   "business_name": "Toko Kopi Aceh",
   "business_type": "souvenir",
-  "address": "Jl. ...",
+  "address": "Jl. Cut Nyak Dhien No. 10",
   "city": "Banda Aceh",
   "province": "Aceh",
   "postal_code": "23116",
-  "description": "optional",
-  "website": "https://...",
-  "category_id": "optional"
+  "description": "Toko oleh-oleh khas Aceh",
+  "website": "https://tokokopi-aceh.com",
+  "category_id": null
 }
 ```
 
-`business_type` enum: `hotel`, `kuliner`, `rental`, `tour`, `destinasi`, `souvenir`.
+Validation rules:
 
-Response (201):
+| Field | Tipe | Wajib | Deskripsi |
+|---|---|---|---|
+| name | string | ✅ | Max 255 |
+| email | email | ✅ | Max 255, unik |
+| password | string | ✅ | Min 8, harus ada password_confirmation |
+| phone | string | ✅ | Max 20, unik |
+| business_name | string | ✅ | Max 255 |
+| business_type | enum | ✅ | hotel, kuliner, rental, tour, destinasi, souvenir |
+| address | string | ✅ | — |
+| city | string | ✅ | — |
+| province | string | ✅ | — |
+| postal_code | string | ❌ | Max 10 |
+| description | string | ❌ | Max 500 |
+| website | url | ❌ | Max 255 |
+| category_id | uuid | ❌ | Harus ada di souvenir_categories |
+
+Response 201:
 
 ```json
 {
   "status": true,
   "message": "Registrasi berhasil. Silakan cek email untuk verifikasi.",
-  "data": { "uuid": "uuid", "email": "budi@merchant.com" }
+  "data": {
+    "uuid": "01a0e882-b4fe-737c-8936-68152828b651",
+    "email": "budi@merchant.com"
+  }
 }
 ```
 
-Error 422: email/phone sudah terdaftar.
+Response 422 — Email sudah terdaftar:
 
-#### POST /login
+```json
+{
+  "status": false,
+  "message": "Validasi gagal.",
+  "errors": {
+    "email": ["Email sudah terdaftar."]
+  }
+}
+```
 
-Request Body:
+**Catatan untuk mobile:**
+
+- Setelah register sukses, arahkan user ke halaman "Cek email untuk verifikasi"
+- Sediakan tombol "Kirim ulang email" — panggil `POST /merchant/resend-verification`
+
+### 5.2 GET /merchant/verify-email/{uuid}
+
+**Deskripsi:** Verifikasi email via link dari email.
+
+**Auth:** tidak perlu token (link dari email)
+
+Path parameter:
+
+| Param | Tipe | Deskripsi |
+|---|---|---|
+| uuid | uuid | UUID merchant |
+
+Query parameter:
+
+| Param | Tipe | Deskripsi |
+|---|---|---|
+| hash | string | SHA-1 dari email merchant |
+
+Contoh link di email:
+
+```text
+https://merchant.ovisito.com/verify-email/01a0e882-b4fe-737c-8936-68152828b651?hash=abc123...
+```
+
+Response 200:
+
+```json
+{
+  "status": true,
+  "message": "Email berhasil diverifikasi."
+}
+```
+
+Response 403 — Hash tidak valid:
+
+```json
+{
+  "status": false,
+  "message": "Hash verifikasi tidak valid."
+}
+```
+
+Response 404 — Merchant tidak ditemukan:
+
+```json
+{
+  "status": false,
+  "message": "Link verifikasi tidak valid."
+}
+```
+
+**Catatan untuk mobile:**
+
+- Deep link — registrasikan URL scheme: `ovisito-merchant://verify-email/{uuid}?hash=...`
+- Backend bisa kirim link universal atau app-link
+- Alternatif: register dengan email, lalu buka email di device, klik link web → web cek → redirect ke app via deep link
+
+### 5.3 POST /merchant/resend-verification
+
+**Deskripsi:** Kirim ulang email verifikasi.
+
+**Rate limit:** 6 req/menit · **Content-Type:** application/json
+
+Request body:
+
+```json
+{
+  "email": "budi@merchant.com"
+}
+```
+
+Response 200:
+
+```json
+{
+  "status": true,
+  "message": "Jika email terdaftar dan belum diverifikasi, link baru telah dikirim."
+}
+```
+
+> ⚠️ Response selalu sukses (anti user-enumeration), bahkan jika email tidak terdaftar.
+
+### 5.4 POST /merchant/login
+
+**Deskripsi:** Login merchant, dapat token Sanctum.
+
+**Rate limit:** 5 req/menit · **Content-Type:** application/json
+
+Request body:
 
 ```json
 {
@@ -529,22 +546,28 @@ Request Body:
 }
 ```
 
-Response:
+`device_name` untuk mobile:
+
+- Android: `"android-merchant"` atau `"android-{Build.MODEL}"`
+- iOS: `"ios-merchant"` atau `"ios-{UIDevice.current.name}"`
+- Web: `"web-merchant"`
+
+Response 200:
 
 ```json
 {
   "status": true,
   "message": "Login berhasil.",
   "data": {
-    "token": "1|abcdef...",
+    "token": "1|abcdefghijklmnopqrstuvwxyz1234567890",
     "merchant": {
-      "uuid": "...",
+      "uuid": "01a0e882-b4fe-737c-8936-68152828b651",
       "name": "Budi Santoso",
-      "email": "...",
-      "phone": "...",
+      "email": "budi@merchant.com",
+      "phone": "081234567890",
       "business_name": "Toko Kopi Aceh",
       "business_type": "souvenir",
-      "address": "...",
+      "address": "Jl. Cut Nyak Dhien No. 10",
       "city": "Banda Aceh",
       "province": "Aceh",
       "category_id": null,
@@ -552,107 +575,227 @@ Response:
       "balance": 0,
       "status": "pending",
       "verified_status": "unverified",
-      "partnership_type": null,
+      "partnership_type": "regular",
       "email_verified_at": "2026-10-08T10:00:00.000000Z"
     }
   }
 }
 ```
 
-Error 403: akun tidak aktif / email belum diverifikasi. Error 422: email atau password salah.
-
-#### POST /logout
-
-Middleware: `auth:merchant_api`. Revoke token aktif.
-
-#### GET /verify-email/{uuid}?hash=<sha1_email>
-
-Verify email merchant. Hash = `sha1(email)`.
-
-#### POST /resend-verification
-
-Body: `{ "email": "..." }`. Anti user-enumeration — selalu return pesan sukses.
-
-#### POST /forgot-password
-
-Body: `{ "email": "..." }`. Kirim email reset password via `MerchantResetPasswordMail`. Response selalu: "Jika email terdaftar, link reset password telah dikirim."
-
-#### POST /reset-password
-
-Request Body:
+Response 403 — Akun tidak aktif:
 
 ```json
 {
-  "token": "<token_dari_email>",
-  "email": "budi@merchant.com",
-  "password": "newpassword",
-  "password_confirmation": "newpassword"
+  "status": false,
+  "message": "Akun merchant tidak aktif."
 }
 ```
 
-Token valid 60 menit. Setelah reset, semua token Sanctum di-revoke.
+Response 403 — Email belum verify:
 
-### 8.2 Profile
+```json
+{
+  "status": false,
+  "message": "Silakan verifikasi email Anda terlebih dahulu.",
+  "data": { "code": "EMAIL_NOT_VERIFIED" }
+}
+```
 
-Middleware: `auth:merchant_api`
+Response 422 — Password salah:
 
-#### GET /profile
+```json
+{
+  "status": false,
+  "message": "Validasi gagal.",
+  "errors": {
+    "email": ["Email atau password salah."]
+  }
+}
+```
 
-Response:
+**Catatan untuk mobile:**
+
+- Simpan token di secure storage: Android `EncryptedSharedPreferences` atau Jetpack Security; iOS Keychain
+- Setelah login, simpan juga merchant object untuk cache local (nama, business_name, dll)
+- Handle `EMAIL_NOT_VERIFIED` → redirect ke layar verifikasi
+
+### 5.5 POST /merchant/logout
+
+**Deskripsi:** Revoke token aktif.
+
+**Auth:** ✅ Bearer token · **Content-Type:** application/json
+
+**Request:** kosong (token di header)
+
+Response 200:
+
+```json
+{
+  "status": true,
+  "message": "Logout berhasil."
+}
+```
+
+**Catatan:** setelah logout, hapus token + merchant data dari storage client.
+
+### 5.6 POST /merchant/forgot-password
+
+**Deskripsi:** Request link reset password via email.
+
+**Rate limit:** 3 req/menit · **Content-Type:** application/json
+
+Request body:
+
+```json
+{
+  "email": "budi@merchant.com"
+}
+```
+
+Response 200:
+
+```json
+{
+  "status": true,
+  "message": "Jika email terdaftar, link reset password telah dikirim."
+}
+```
+
+> ⚠️ Response selalu sukses (anti user-enumeration).
+
+### 5.7 POST /merchant/reset-password
+
+**Deskripsi:** Reset password dengan token dari email.
+
+**Rate limit:** 5 req/menit · **Content-Type:** application/json
+
+Request body:
+
+```json
+{
+  "token": "abcdefghij...",
+  "email": "budi@merchant.com",
+  "password": "newpassword456",
+  "password_confirmation": "newpassword456"
+}
+```
+
+Response 200:
+
+```json
+{
+  "status": true,
+  "message": "Password berhasil direset. Silakan login."
+}
+```
+
+Response 422 — Token invalid/expired:
+
+```json
+{
+  "status": false,
+  "message": "Token reset tidak valid atau sudah kadaluarsa."
+}
+```
+
+> ⚠️ **Setelah reset:**
+>
+> - Semua token Sanctum lama di-revoke
+> - User harus login ulang di semua device
+
+**Catatan untuk mobile:**
+
+- Link reset di email → web page → user isi password → submit ke API
+- Alternatif: deep link `ovisito-merchant://reset-password?token=...&email=...`
+
+## 6. Endpoints — Profile
+
+### 6.1 GET /merchant/profile
+
+**Deskripsi:** Ambil data profil merchant.
+
+**Auth:** ✅ Bearer token
+
+Response 200:
 
 ```json
 {
   "status": true,
   "data": {
-    "uuid": "...",
-    "name": "...",
-    "email": "...",
-    "phone": "...",
-    "business_name": "...",
+    "uuid": "01a0e882-b4fe-737c-8936-68152828b651",
+    "name": "Budi Santoso",
+    "email": "budi@merchant.com",
+    "phone": "081234567890",
+    "business_name": "Toko Kopi Aceh",
     "business_type": "souvenir",
-    "address": "...",
-    "city": "...",
-    "province": "...",
-    "postal_code": "...",
-    "description": "...",
-    "website": "...",
-    "logo": "merchants/uuid/logo.png",
+    "address": "Jl. Cut Nyak Dhien No. 10",
+    "city": "Banda Aceh",
+    "province": "Aceh",
+    "postal_code": "23116",
+    "description": "Toko oleh-oleh khas Aceh",
+    "website": "https://tokokopi-aceh.com",
+    "logo": "merchants/01a0e882/logo.png",
     "status": "active",
     "verified_status": "verified",
     "partnership_type": "regular",
     "balance": 150000,
     "category_id": null,
-    "email_verified_at": "...",
-    "created_at": "...",
-    "updated_at": "..."
+    "email_verified_at": "2026-10-08T10:00:00.000000Z",
+    "created_at": "2026-10-01T08:00:00.000000Z",
+    "updated_at": "2026-10-08T10:30:00.000000Z"
   }
 }
 ```
 
-`password`, `remember_token`, `tokens` tidak di-expose.
+> ⚠️ Field `password` dan `remember_token` TIDAK di-expose.
 
-#### PUT /profile
+### 6.2 PUT /merchant/profile
 
-Body (multipart/form-data untuk upload logo):
+**Deskripsi:** Update profil merchant.
 
-| Field | Tipe | Deskripsi |
-|---|---|---|
-| name | string | — |
-| phone | string | Max 20 |
-| business_name | string | Max 255 |
-| address | string | — |
-| city | string | Max 100 |
-| province | string | Max 100 |
-| postal_code | string | Max 10 |
-| description | string | Max 1000 |
-| website | url | Max 255 |
-| logo | file | jpeg/png/jpg/webp, max 2 MB |
+**Auth:** ✅ Bearer token · **Content-Type:** multipart/form-data (untuk upload logo) atau application/json
 
-Semua field `sometimes`. Logo lama otomatis dihapus kalau upload logo baru.
+Request body:
 
-#### PUT /change-password
+| Field | Tipe | Wajib | Deskripsi |
+|---|---|---|---|
+| name | string | ❌ | Max 255 |
+| phone | string | ❌ | Max 20 |
+| business_name | string | ❌ | Max 255 |
+| address | string | ❌ | — |
+| city | string | ❌ | Max 100 |
+| province | string | ❌ | Max 100 |
+| postal_code | string | ❌ | Max 10 |
+| description | string | ❌ | Max 1000 |
+| website | url | ❌ | Max 255 |
+| logo | file | ❌ | jpeg/png/jpg/webp, max 2 MB |
 
-Request Body:
+> ⚠️ Semua field `sometimes` — kirim hanya field yang mau diubah.
+
+Response 200:
+
+```json
+{
+  "status": true,
+  "message": "Profil berhasil diperbarui.",
+  "data": { }
+}
+```
+
+`data` berisi object merchant yang sudah diperbarui.
+
+**Catatan untuk mobile:**
+
+- Untuk multipart, gunakan `MultipartBody.Part` (Retrofit) atau `multipartFormData` (URLSession)
+- Logo lama otomatis dihapus kalau upload logo baru
+
+### 6.3 PUT /merchant/change-password
+
+**Deskripsi:** Ganti password.
+
+**Auth:** ✅ Bearer token · **Content-Type:** application/json
+
+Request body:
 
 ```json
 {
@@ -664,19 +807,44 @@ Request Body:
 
 Rules:
 
-- Password baru minimal 8 karakter
+- `new_password` minimal 8 karakter
+- Harus ada `new_password_confirmation` yang sama
 - Password baru ≠ password lama
-- Setelah ganti → semua token lain di-revoke (kecuali token sekarang)
 
-Error 422: current password salah / password baru sama dengan lama.
+Response 200:
 
-### 8.3 Dashboard
+```json
+{
+  "status": true,
+  "message": "Password berhasil diubah."
+}
+```
 
-Middleware: `auth:merchant_api`
+Response 422 — Password lama salah:
 
-#### GET /dashboard
+```json
+{
+  "status": false,
+  "message": "Password saat ini salah."
+}
+```
 
-Response:
+> ⚠️ **Setelah ganti password:**
+>
+> - Semua token LAIN di-revoke (kecuali token yang dipakai request ini)
+> - Device lain otomatis logout
+
+**Catatan untuk mobile:** setelah sukses, tetap gunakan token yang sama. Kalau ingin revoke semua termasuk device ini, panggil logout setelahnya.
+
+## 7. Endpoints — Dashboard
+
+### 7.1 GET /merchant/dashboard
+
+**Deskripsi:** Dashboard summary — stats, chart, recent orders.
+
+**Auth:** ✅ Bearer token
+
+Response 200:
 
 ```json
 {
@@ -694,12 +862,16 @@ Response:
       "formatted_balance": "Rp 150.000"
     },
     "order_status": {
-      "pending": 3, "paid": 1, "processing": 2,
-      "shipped": 1, "completed": 34, "cancelled": 1
+      "pending": 3,
+      "paid": 1,
+      "processing": 2,
+      "shipped": 1,
+      "completed": 34,
+      "cancelled": 1
     },
     "recent_orders": [
       {
-        "order_number": "SO-20261008-XXXXXXXX",
+        "order_number": "SO-20261008-ABC123XY",
         "total_amount": 135000,
         "formatted_total": "Rp 135.000",
         "status": "paid",
@@ -711,23 +883,30 @@ Response:
       }
     ],
     "sales_chart": [
-      { "date": "2026-10-02", "label": "Wed", "total_orders": 3, "total_revenue": 350000 }
+      {
+        "date": "2026-10-02",
+        "label": "Wed",
+        "total_orders": 3,
+        "total_revenue": 350000
+      }
     ]
   }
 }
 ```
 
-#### GET /dashboard/summary
+`sales_chart` berisi 7 entri (satu per hari, 7 hari terakhir); contoh di atas dipersingkat.
 
-Response ringkas: `today_orders`, `today_revenue`, `week_orders`, `pending_orders`, `balance`.
+**Catatan untuk mobile:**
 
-### 8.4 Store Management
+- Chart data (7 hari terakhir) dalam format array
+- `label` adalah nama hari singkat (Mon, Tue, ...)
+- FE mobile render bar chart / line chart dari `sales_chart`
 
-Middleware: `auth:merchant_api`
+### 7.2 GET /merchant/dashboard/summary
 
-#### GET /store
+**Deskripsi:** Ringkasan cepat untuk widget dashboard.
 
-Ambil toko default merchant.
+**Auth:** ✅ Bearer token
 
 Response 200:
 
@@ -735,51 +914,89 @@ Response 200:
 {
   "status": true,
   "data": {
-    "id": "uuid",
-    "merchant_uuid": "uuid",
-    "name": "Toko Kopi Aceh",
-    "slug": "toko-kopi-aceh",
-    "description": "...",
-    "address": "...",
-    "phone": "...",
-    "email": null,
-    "website": null,
-    "logo": null,
-    "is_physical": true,
-    "is_active": true,
-    "is_default": true,
-    "kabupaten_kota_id": null,
-    "kecamatan_id": null,
-    "desa_id": null,
-    "latitude": null,
-    "longitude": null,
-    "jam_buka": "08:00",
-    "jam_tutup": "17:00",
-    "category_ids": ["uuid1", "uuid2"],
-    "categories": [ { "id": "...", "name": "..." } ],
-    "created_at": "...",
-    "updated_at": "..."
+    "today_orders": 5,
+    "today_revenue": 675000,
+    "formatted_today_revenue": "Rp 675.000",
+    "week_orders": 28,
+    "pending_orders": 3,
+    "balance": 150000,
+    "formatted_balance": "Rp 150.000"
   }
 }
 ```
 
-Response 404 kalau belum punya toko: `{ "status": false, "message": "Toko tidak ditemukan.", "data": null }`.
+## 8. Endpoints — Store
 
-#### POST /store
+### 8.1 GET /merchant/store
 
-Buat toko baru. Satu merchant hanya boleh punya 1 toko (untuk sekarang).
+**Deskripsi:** Ambil toko default merchant.
 
-Request Body (multipart/form-data):
+**Auth:** ✅ Bearer token
+
+Response 200:
+
+```json
+{
+  "status": true,
+  "data": {
+    "id": "01a0e882-b4fe-737c-8936-68152828b651",
+    "merchant_uuid": "44cdb641-7787-4c2c-90e8-8cb561b8bb61",
+    "name": "Toko Kopi Aceh",
+    "slug": "toko-kopi-aceh",
+    "description": "Toko oleh-oleh khas Aceh",
+    "address": "Jl. Cut Nyak Dhien No. 10",
+    "phone": "081234567890",
+    "email": "tokokopi@example.com",
+    "website": "https://tokokopi-aceh.com",
+    "logo": "stores/01a0e882/logo.png",
+    "is_physical": true,
+    "is_active": true,
+    "is_default": true,
+    "kabupaten_kota_id": 1101,
+    "kecamatan_id": null,
+    "desa_id": null,
+    "latitude": 5.5483,
+    "longitude": 95.3238,
+    "jam_buka": "08:00",
+    "jam_tutup": "17:00",
+    "category_ids": ["uuid1", "uuid2"],
+    "categories": [
+      { "id": "uuid1", "name": "Makanan" },
+      { "id": "uuid2", "name": "Minuman" }
+    ],
+    "created_at": "2026-10-01T08:00:00.000000Z",
+    "updated_at": "2026-10-08T10:30:00.000000Z"
+  }
+}
+```
+
+Response 404 — Belum punya toko:
+
+```json
+{
+  "status": false,
+  "message": "Toko tidak ditemukan.",
+  "data": null
+}
+```
+
+### 8.2 POST /merchant/store
+
+**Deskripsi:** Buat toko baru. Satu merchant hanya boleh punya 1 toko.
+
+**Auth:** ✅ Bearer token · **Content-Type:** multipart/form-data
+
+Request body:
 
 | Field | Tipe | Wajib | Deskripsi |
 |---|---|---|---|
 | name | string | ✅ | Max 255 |
 | address | string | ✅ | — |
 | phone | string | ✅ | Max 20 |
-| category_ids | array | ✅ | 1–5 UUID kategori |
+| category_ids[] | array uuid | ✅ | 1–5 UUID kategori |
 | description | string | ❌ | — |
-| email | email | ❌ | — |
-| website | url | ❌ | — |
+| email | email | ❌ | Max 255 |
+| website | url | ❌ | Max 255 |
 | is_physical | bool | ❌ | Default true |
 | logo | file | ❌ | jpeg/png/jpg/webp, max 2 MB |
 | kabupaten_kota_id | int | ❌ | — |
@@ -790,39 +1007,95 @@ Request Body (multipart/form-data):
 | jam_buka | string | ❌ | Format HH:MM |
 | jam_tutup | string | ❌ | Format HH:MM |
 
-Response (201): data store lengkap. Error 422: merchant sudah punya toko / validasi gagal.
+Response 201:
 
-#### PUT /store
+```json
+{
+  "status": true,
+  "message": "Toko berhasil dibuat.",
+  "data": { }
+}
+```
 
-Update toko. Semua field `sometimes`. Slug otomatis regenerate kalau `name` berubah.
+`data` berisi object store lengkap.
 
-> ⭐ **v2.6:** Set field jadi `null` sekarang benar-benar update (mis. `{"website": null}` → website jadi null). Sebelumnya di-skip.
+Response 422 — Sudah punya toko:
 
-#### GET /store/{uuid}
+```json
+{
+  "status": false,
+  "message": "Merchant sudah memiliki toko."
+}
+```
 
-Detail toko by UUID.
+**Catatan untuk mobile:**
 
-### 8.5 Categories (Read-Only)
+- Multipart upload untuk logo
+- Array `category_ids[]` — di Android Retrofit pakai `@Part("category_ids[]")` atau FormData
+- Di iOS URLSession, kirim sebagai multipart form fields dengan key `category_ids[]`
 
-Middleware: `auth:merchant_api`
+### 8.3 PUT /merchant/store
 
-#### GET /souvenir/categories
+**Deskripsi:** Update toko default.
 
-Ambil kategori aktif berbentuk tree (parent + children).
+**Auth:** ✅ Bearer token · **Content-Type:** multipart/form-data
+
+**Request body:** sama seperti `POST /merchant/store`, semua field `sometimes`.
+
+Response 200:
+
+```json
+{
+  "status": true,
+  "message": "Toko berhasil diperbarui.",
+  "data": { }
+}
+```
+
+**Catatan:**
+
+- Kalau `name` diubah → slug otomatis regenerate (unique)
+- Field yang di-set `null` benar-benar di-null (mis. `{"website": null}`)
+
+### 8.4 GET /merchant/store/{uuid}
+
+**Deskripsi:** Detail toko by UUID.
+
+**Auth:** ✅ Bearer token
+
+Response 200: sama struktur dengan `GET /merchant/store`.
+
+## 9. Endpoints — Categories (Read-only)
+
+### 9.1 GET /merchant/souvenir/categories
+
+**Deskripsi:** Daftar kategori aktif berbentuk tree (parent + children). Untuk form tambah/edit produk.
+
+**Auth:** ✅ Bearer token
+
+Response 200:
 
 ```json
 {
   "status": true,
   "data": [
     {
-      "id": "uuid",
+      "id": "uuid-makanan",
       "name": "Makanan",
       "slug": "makanan",
-      "description": "...",
+      "description": "Makanan khas Aceh",
       "parent_id": null,
       "is_active": true,
       "children": [
-        { "id": "uuid", "name": "Kue Kering", "slug": "kue-kering", "description": null, "parent_id": "uuid", "is_active": true, "children": [] }
+        {
+          "id": "uuid-kue-kering",
+          "name": "Kue Kering",
+          "slug": "kue-kering",
+          "description": null,
+          "parent_id": "uuid-makanan",
+          "is_active": true,
+          "children": []
+        }
       ]
     }
   ],
@@ -830,15 +1103,32 @@ Ambil kategori aktif berbentuk tree (parent + children).
 }
 ```
 
-Merchant hanya boleh read kategori — CRUD adalah wewenang admin.
+**Catatan untuk mobile:**
 
-### 8.6 Souvenir Products
+- Kategori read-only — tidak bisa CRUD dari merchant
+- Cache di local storage (mis. Room/SQLite/UserDefaults) — kategori jarang berubah
+- Refresh cache 1x per hari atau on-demand
 
-**Base:** `/api/v2/merchant/souvenir/products`
+## 10. Endpoints — Products
 
-#### GET /products
+### 10.1 GET /merchant/souvenir/products
 
-Query: `search`, `category_id`, `is_active`, `featured`, `per_page` (max 60), `page`.
+**Deskripsi:** List produk merchant.
+
+**Auth:** ✅ Bearer token
+
+Query parameters:
+
+| Param | Tipe | Default | Deskripsi |
+|---|---|---|---|
+| search | string | — | Cari nama atau SKU |
+| category_id | uuid | — | Filter kategori |
+| is_active | bool | — | Filter status aktif |
+| featured | bool | — | Filter produk unggulan |
+| per_page | int | 15 | Max 60 |
+| page | int | 1 | — |
+
+Response 200:
 
 ```json
 {
@@ -849,91 +1139,248 @@ Query: `search`, `category_id`, `is_active`, `featured`, `per_page` (max 60), `p
       "name": "Kopi Aceh Gayo",
       "slug": "kopi-aceh-gayo",
       "sku": "SKU-ABCD1234",
+      "description": "...",
       "price": "50000.00",
       "discount_price": "40000.00",
       "final_price": 40000,
       "stock": 100,
       "weight": "250.00",
-      "images": ["souvenir/products/..."],
+      "images": ["souvenir/products/xyz.jpg"],
       "is_active": true,
       "featured": false,
       "views": 42,
-      "category": { },
-      "store": { }
+      "category": { "id": "uuid", "name": "Minuman", "slug": "minuman" },
+      "store": { "id": "uuid", "name": "Toko Kopi Aceh", "slug": "toko-kopi-aceh" },
+      "created_at": "2026-10-01T08:00:00.000000Z"
     }
   ],
-  "meta": { "current_page": 1, "last_page": 3, "per_page": 15, "total": 42 }
+  "meta": {
+    "current_page": 1,
+    "last_page": 3,
+    "per_page": 15,
+    "total": 42
+  }
 }
 ```
 
-#### POST /products
+### 10.2 POST /merchant/souvenir/products
 
-Request Body (multipart/form-data):
+**Deskripsi:** Buat produk baru.
+
+**Auth:** ✅ Bearer token · **Content-Type:** multipart/form-data
+
+Request body:
 
 | Field | Tipe | Wajib | Deskripsi |
 |---|---|---|---|
 | name | string | ✅ | Max 255 |
 | price | numeric | ✅ | Min 0 |
 | stock | int | ✅ | Min 0 |
-| sku | string | ❌ | Auto-generate kalau kosong |
+| sku | string | ❌ | Max 100, unik. Kalau kosong, auto-generate |
 | category_id | uuid | ❌ | — |
 | store_id | uuid | ❌ | Default store merchant |
 | description | string | ❌ | — |
 | discount_price | numeric | ❌ | Harus < price |
 | weight | numeric | ❌ | Gram |
-| images | array | ❌ | Max 5 file, jpeg/png/jpg/gif/webp, max 2 MB each |
+| images[] | file array | ❌ | Max 5 file, jpeg/png/jpg/gif/webp, max 2 MB each |
 | is_active | bool | ❌ | Default true |
 | featured | bool | ❌ | Default false |
 
-Response (201):
+Response 201:
 
 ```json
-{ "status": true, "message": "Produk berhasil ditambahkan.", "data": { } }
+{
+  "status": true,
+  "message": "Produk berhasil ditambahkan.",
+  "data": { }
+}
 ```
 
-#### GET /products/{id}
+Response 422 — SKU duplikat:
 
-Detail produk milik merchant.
+```json
+{
+  "status": false,
+  "message": "Validasi gagal.",
+  "errors": {
+    "sku": ["Kode produk (SKU) ini sudah digunakan, gunakan kode lain."]
+  }
+}
+```
 
-#### PUT/PATCH /products/{id}
+### 10.3 GET /merchant/souvenir/products/{id}
 
-Update produk. Field `sometimes`. Slug auto-regenerate kalau `name` berubah. Image baru di-append.
+**Deskripsi:** Detail produk.
 
-#### DELETE /products/{id}
+**Auth:** ✅ Bearer token
 
-Soft delete. Semua file image dihapus dari disk.
+Response 200:
 
-#### PUT /products/{id}/stock
+```json
+{
+  "status": true,
+  "data": { }
+}
+```
 
-Request Body: `{ "stock": 25 }`
+Response 404:
+
+```json
+{
+  "status": false,
+  "message": "Produk tidak ditemukan."
+}
+```
+
+### 10.4 PUT /merchant/souvenir/products/{id}
+
+**Deskripsi:** Update produk.
+
+**Auth:** ✅ Bearer token · **Content-Type:** multipart/form-data
+
+**Request body:** semua field `sometimes`, sama seperti POST.
+
+Response 200:
+
+```json
+{
+  "status": true,
+  "message": "Produk berhasil diperbarui.",
+  "data": { }
+}
+```
+
+### 10.5 DELETE /merchant/souvenir/products/{id}
+
+**Deskripsi:** Soft delete produk. Semua file gambar dihapus dari disk.
+
+**Auth:** ✅ Bearer token
+
+Response 200:
+
+```json
+{
+  "status": true,
+  "message": "Produk berhasil dihapus."
+}
+```
+
+### 10.6 PUT /merchant/souvenir/products/{id}/stock
+
+**Deskripsi:** Update stok produk.
+
+**Auth:** ✅ Bearer token · **Content-Type:** application/json
+
+Request body:
+
+```json
+{
+  "stock": 25
+}
+```
+
+Response 200:
 
 ```json
 {
   "status": true,
   "message": "Stok produk berhasil diperbarui.",
-  "data": { "id": "uuid", "name": "Kopi Aceh Gayo", "stock": 25 }
+  "data": {
+    "id": "uuid",
+    "name": "Kopi Aceh Gayo",
+    "stock": 25
+  }
 }
 ```
 
-#### PUT /products/{id}/toggle-active
+### 10.7 PUT /merchant/souvenir/products/{id}/toggle-active
 
-Toggle `is_active`.
+**Deskripsi:** Toggle status aktif produk.
+
+**Auth:** ✅ Bearer token
+
+Response 200:
 
 ```json
 {
   "status": true,
   "message": "Produk diaktifkan.",
-  "data": { "id": "uuid", "name": "...", "is_active": true }
+  "data": {
+    "id": "uuid",
+    "name": "Kopi Aceh Gayo",
+    "is_active": true
+  }
 }
 ```
 
-### 8.7 Souvenir Orders
+### 10.8 POST /merchant/souvenir/products/{id}/images
 
-**Base:** `/api/v2/merchant/souvenir/orders`
+**Deskripsi:** Upload gambar produk (tambahan, opsional).
 
-#### GET /orders
+**Auth:** ✅ Bearer token · **Content-Type:** multipart/form-data
 
-Query: `status`, `search` (order_number), `date_from`, `date_to`, `per_page` (max 50), `page`.
+Request body:
+
+```text
+images[]: <file>
+images[]: <file>
+```
+
+Max 5 file, total max 5 gambar per produk.
+
+Response 200:
+
+```json
+{
+  "status": true,
+  "message": "Gambar berhasil diupload.",
+  "data": ["souvenir/products/xyz.jpg", "..."]
+}
+```
+
+### 10.9 DELETE /merchant/souvenir/products/{id}/images
+
+**Deskripsi:** Hapus gambar produk.
+
+**Auth:** ✅ Bearer token · **Content-Type:** application/json
+
+Request body:
+
+```json
+{
+  "image": "souvenir/products/xyz.jpg"
+}
+```
+
+Response 200:
+
+```json
+{
+  "status": true,
+  "message": "Gambar berhasil dihapus."
+}
+```
+
+## 11. Endpoints — Orders
+
+### 11.1 GET /merchant/souvenir/orders
+
+**Deskripsi:** List pesanan merchant.
+
+**Auth:** ✅ Bearer token
+
+Query parameters:
+
+| Param | Tipe | Default | Deskripsi |
+|---|---|---|---|
+| status | enum | — | pending, paid, processing, shipped, completed, cancelled |
+| search | string | — | Cari order number |
+| date_from | date | — | Format YYYY-MM-DD |
+| date_to | date | — | Format YYYY-MM-DD |
+| per_page | int | 15 | Max 50 |
+| page | int | 1 | — |
+
+Response 200:
 
 ```json
 {
@@ -941,84 +1388,214 @@ Query: `status`, `search` (order_number), `date_from`, `date_to`, `per_page` (ma
   "data": [
     {
       "id": "uuid",
-      "order_number": "SO-20261008-XXXXXXXX",
+      "order_number": "SO-20261008-ABC123XY",
       "status": "paid",
+      "status_label": "Dibayar",
+      "status_badge_class": "bg-blue-100 text-blue-800",
       "payment_status": "paid",
+      "payment_status_label": "Dibayar",
       "total_amount": "135000.00",
+      "formatted_total": "Rp 135.000",
       "shipping_cost": "15000.00",
-      "user": { "uuid": "...", "name": "Budi" },
-      "items": [ ],
-      "shipping_trackings": [ ],
-      "ordered_at": "2026-10-08T10:30:00.000000Z"
+      "discount_total": "0.00",
+      "user": {
+        "uuid": "uuid",
+        "name": "Budi Santoso",
+        "phone": "628123456789",
+        "email": "budi@example.com"
+      },
+      "shipping_address": {
+        "name": "Budi Santoso",
+        "phone": "628123456789",
+        "address": "Jl. ...",
+        "city": "Banda Aceh",
+        "postal_code": "23116"
+      },
+      "items": [
+        {
+          "id": "uuid",
+          "product_name": "Kopi Aceh Gayo",
+          "price": "50000.00",
+          "quantity": 2,
+          "subtotal": "100000.00"
+        }
+      ],
+      "shipping_trackings": [],
+      "ordered_at": "2026-10-08T10:30:00.000000Z",
+      "paid_at": "2026-10-08T10:35:00.000000Z"
     }
   ],
   "meta": { }
 }
 ```
 
-#### GET /orders/{uuid}
+> ⚠️ **PENTING — Filter data customer:**
 
-Detail order + items + product + tracking.
+| Status Pembayaran | shipping_address | user.phone | user.email | user.name |
+|---|---|---|---|---|
+| paid | Full | Full | Full | Full |
+| belum paid | null | null | null | Di-mask ("Budi S.") |
 
-#### PUT /orders/{uuid}/status
+Ini aturan bisnis: merchant tidak boleh hubungi customer sebelum pesanan dibayar. Kontak lengkap muncul di dashboard setelah pelunasan.
 
-Request Body:
+### 11.2 GET /merchant/souvenir/orders/{uuid}
+
+**Deskripsi:** Detail pesanan.
+
+**Auth:** ✅ Bearer token
+
+Response 200:
 
 ```json
-{ "status": "processing", "reason": "optional, wajib kalau cancelled" }
+{
+  "status": true,
+  "data": {
+    "id": "uuid",
+    "order_number": "SO-20261008-ABC123XY",
+    "status": "paid",
+    "payment_status": "paid",
+    "total_amount": "135000.00",
+    "shipping_address": { },
+    "user": { },
+    "items": [ ],
+    "shipping_trackings": [ ],
+    "courier": null,
+    "tracking_number": null,
+    "shipped_at": null,
+    "completed_at": null,
+    "notes": null,
+    "ordered_at": "2026-10-08T10:30:00.000000Z",
+    "paid_at": "2026-10-08T10:35:00.000000Z"
+  }
+}
 ```
 
-Transisi valid via endpoint ini:
+`shipping_address` bernilai `null` untuk order yang belum paid (lihat aturan filter di 11.1).
 
-| Dari | Ke |
+### 11.3 PUT /merchant/souvenir/orders/{uuid}/status
+
+**Deskripsi:** Update status pesanan.
+
+**Auth:** ✅ Bearer token · **Rate limit:** 60 req/menit · **Content-Type:** application/json
+
+Request body:
+
+```json
+{
+  "status": "processing",
+  "reason": null
+}
+```
+
+Field `reason` wajib diisi kalau `status = cancelled`.
+
+Transisi valid:
+
+| Status Sekarang | Status Tujuan Valid |
 |---|---|
 | paid | processing, cancelled |
 | processing | cancelled |
 | shipped | completed |
 
-> ⚠️ **Breaking change v2.6:** Status `shipped` tidak boleh di-set lewat endpoint ini. Wajib lewat `/ship` atau `/ship-kiriminaja` supaya `tracking_number` + shipping log konsisten.
+> ⚠️ `shipped` TIDAK BOLEH lewat endpoint ini. Untuk kirim pesanan, gunakan `POST /merchant/souvenir/orders/{uuid}/ship`.
 
-Error 422: transisi tidak valid / status tidak diizinkan.
+Response 200:
 
-#### POST /orders/{uuid}/ship
+```json
+{
+  "status": true,
+  "message": "Status pesanan berhasil diperbarui.",
+  "data": { }
+}
+```
 
-Kirim manual — input resi + kurir.
+Response 422 — Transisi tidak valid:
+
+```json
+{
+  "status": false,
+  "message": "Transisi status dari 'pending' ke 'processing' tidak diizinkan."
+}
+```
+
+Response 422 — Status tidak diizinkan:
+
+```json
+{
+  "status": false,
+  "message": "Validasi gagal.",
+  "errors": {
+    "status": ["Status hanya boleh: processing, completed, atau cancelled. Untuk mengirim pesanan gunakan endpoint /ship."]
+  }
+}
+```
+
+### 11.4 POST /merchant/souvenir/orders/{uuid}/ship
+
+**Deskripsi:** Kirim pesanan manual (input resi).
+
+**Auth:** ✅ Bearer token · **Rate limit:** 60 req/menit · **Content-Type:** application/json atau form-data
+
+Request body:
 
 ```json
 {
   "tracking_number": "JNE1234567890",
   "courier": "jne",
-  "delivery_note": "optional, max 500"
+  "delivery_note": "Dikirim via JNE Reguler"
 }
 ```
 
-Aturan:
+Rules:
 
-- Order harus `paid` atau `processing`
-- Belum punya `tracking_number` (cegah overwrite)
+- Order harus berstatus `paid` atau `processing`
+- Belum punya `tracking_number` — cegah overwrite
 
-Response:
-
-```json
-{ "status": true, "message": "Pesanan berhasil dikirim.", "data": { } }
-```
-
-Error 422: status tidak valid / sudah punya resi.
-
-#### POST /orders/{uuid}/ship-kiriminaja
-
-Kirim via KiriminAja — auto AWB.
+Response 200:
 
 ```json
 {
-  "sender_name": "...",
-  "sender_phone": "...",
-  "sender_address": "...",
-  "sender_district_id": 12345,
-  "recipient_name": "Budi",
+  "status": true,
+  "message": "Pesanan berhasil dikirim.",
+  "data": {
+    "id": "uuid",
+    "status": "shipped",
+    "status_label": "Dikirim",
+    "courier": "jne",
+    "tracking_number": "JNE1234567890",
+    "shipped_at": "2026-10-08T11:00:00.000000Z",
+    "estimated_delivery_at": "2026-10-11T11:00:00.000000Z"
+  }
+}
+```
+
+Response 422:
+
+```json
+{
+  "status": false,
+  "message": "Pesanan sudah punya nomor resi: JNE1234567890."
+}
+```
+
+### 11.5 POST /merchant/souvenir/orders/{uuid}/ship-kiriminaja
+
+**Deskripsi:** Kirim via KiriminAja (auto AWB).
+
+**Auth:** ✅ Bearer token · **Content-Type:** application/json
+
+Request body:
+
+```json
+{
+  "sender_name": "Toko Kopi Aceh",
+  "sender_phone": "081234567890",
+  "sender_address": "Jl. Cut Nyak Dhien No. 10, Banda Aceh",
+  "sender_district_id": 1101010,
+  "recipient_name": "Budi Santoso",
   "recipient_phone": "628123456789",
-  "recipient_address": "Jl. ...",
-  "recipient_district_id": 54321,
+  "recipient_address": "Jl. Sudirman No. 5, Banda Aceh",
+  "recipient_district_id": 1101020,
   "courier_code": "jne",
   "service_type": "REG",
   "schedule": null,
@@ -1026,25 +1603,49 @@ Kirim via KiriminAja — auto AWB.
   "width": 20,
   "height": 10,
   "length": 15,
-  "delivery_note": "optional"
+  "delivery_note": "Handle with care"
 }
 ```
 
-`courier_code` enum: `jne`, `jnt`, `sicepat`, `pos`, `anteraja`.
+`courier_code` enum: `jne`, `jnt`, `sicepat`, `pos`, `anteraja`
 
-Response:
+Response 200:
 
 ```json
 {
   "status": true,
   "message": "Pesanan berhasil dikirim via KiriminAja.",
-  "data": { "order": { }, "shipping": { } }
+  "data": {
+    "order": { },
+    "shipping": {
+      "success": true,
+      "awb": "JNE1234567890",
+      "courier": "jne",
+      "order_id": "KRM-20261008-123",
+      "message": "Berhasil request pickup."
+    }
+  }
 }
 ```
 
-`shipping` berisi response KiriminAja. Error 502: KiriminAja return error.
+`order` berisi object order yang sudah diperbarui.
 
-#### GET /orders/{uuid}/track
+Response 502 — KiriminAja error:
+
+```json
+{
+  "status": false,
+  "message": "Gagal membuat pengiriman via KiriminAja."
+}
+```
+
+### 11.6 GET /merchant/souvenir/orders/{uuid}/track
+
+**Deskripsi:** Lacak pesanan.
+
+**Auth:** ✅ Bearer token
+
+Response 200:
 
 ```json
 {
@@ -1052,22 +1653,71 @@ Response:
   "data": {
     "tracking_number": "JNE1234567890",
     "courier": "jne",
-    "tracking": { },
-    "history": [ ],
+    "tracking": {
+      "summary": { },
+      "detail": [ ]
+    },
+    "history": [
+      {
+        "id": "uuid",
+        "status": "shipped",
+        "description": "Paket telah dikirim melalui jne dengan nomor resi JNE1234567890",
+        "location": "Banda Aceh",
+        "tracked_at": "2026-10-08T11:00:00.000000Z"
+      },
+      {
+        "id": "uuid",
+        "status": "in_transit",
+        "description": "Paket sedang dalam perjalanan",
+        "location": "Medan",
+        "tracked_at": "2026-10-08T15:30:00.000000Z"
+      }
+    ],
     "remote_error": null
   }
 }
 ```
 
-`tracking` = response KiriminAja, `history` = `shipping_trackings` lokal. `remote_error` diisi kalau KiriminAja timeout/error, tapi history lokal tetap dikirim.
+`tracking.summary` dan `tracking.detail` berisi data dari KiriminAja.
 
-### 8.8 Transactions & Withdraw
+Kalau KiriminAja timeout:
 
-**Base:** `/api/v2/merchant`
+```json
+{
+  "status": true,
+  "data": {
+    "tracking_number": "JNE1234567890",
+    "courier": "jne",
+    "tracking": null,
+    "history": [ ],
+    "remote_error": "Connection timeout"
+  }
+}
+```
 
-#### GET /transactions
+`history` pada kasus ini berisi history lokal.
 
-Gabungan pemasukan (order completed) + pengeluaran (withdrawal).
+**Catatan untuk mobile:**
+
+- Kalau `remote_error` ada → tampilkan warning kecil + tampil history lokal saja
+- Kalau `tracking` ada → tampilkan data live dari kurir
+
+## 12. Endpoints — Transactions & Withdraw
+
+### 12.1 GET /merchant/transactions
+
+**Deskripsi:** Riwayat transaksi (gabungan order + withdrawal).
+
+**Auth:** ✅ Bearer token
+
+Query parameters:
+
+| Param | Tipe | Default |
+|---|---|---|
+| per_page | int | 15 |
+| page | int | 1 |
+
+Response 200:
 
 ```json
 {
@@ -1079,8 +1729,9 @@ Gabungan pemasukan (order completed) + pengeluaran (withdrawal).
       "amount": 135000,
       "formatted_amount": "Rp 135.000",
       "is_credit": true,
-      "reference": "SO-20261008-XXXXXXXX",
+      "reference": "SO-20261008-ABC123XY",
       "description": "Pembayaran order",
+      "status": "completed",
       "created_at": "2026-10-08T10:30:00.000000Z"
     },
     {
@@ -1089,7 +1740,7 @@ Gabungan pemasukan (order completed) + pengeluaran (withdrawal).
       "amount": -50000,
       "formatted_amount": "Rp 50.000",
       "is_credit": false,
-      "reference": "uuid",
+      "reference": "WD-20261007-XYZ789",
       "description": "Penarikan saldo",
       "status": "pending",
       "created_at": "2026-10-07T15:00:00.000000Z"
@@ -1099,9 +1750,18 @@ Gabungan pemasukan (order completed) + pengeluaran (withdrawal).
 }
 ```
 
-> **v2.6:** Karena `souvenir_orders` dan `merchant_withdrawals` di connection berbeda, query tidak pakai UNION SQL — di-merge di PHP.
+Field `type`:
 
-#### POST /withdraw
+- `"order"` — pemasukan dari order completed (amount positif, `is_credit = true`)
+- `"withdrawal"` — penarikan saldo (amount negatif, `is_credit = false`)
+
+### 12.2 POST /merchant/withdraw
+
+**Deskripsi:** Ajukan penarikan saldo.
+
+**Auth:** ✅ Bearer token · **Rate limit:** 10 req/menit · **Content-Type:** application/json
+
+Request body:
 
 ```json
 {
@@ -1114,11 +1774,11 @@ Gabungan pemasukan (order completed) + pengeluaran (withdrawal).
 
 Rules:
 
-- Minimum Rp 10.000, maximum Rp 100.000.000
-- Saldo harus cukup
-- Lock merchant row untuk cegah double-withdraw
+- Minimum Rp 10.000
+- Maximum Rp 100.000.000 per transaksi
+- Saldo harus mencukupi
 
-Response:
+Response 200:
 
 ```json
 {
@@ -1126,6 +1786,7 @@ Response:
   "message": "Permintaan penarikan berhasil. Proses 1-3 hari kerja.",
   "data": {
     "withdrawal_id": "uuid",
+    "reference": "WD-20261008-ABC123",
     "amount": 50000,
     "formatted_amount": "Rp 50.000",
     "balance_after": 100000,
@@ -1134,759 +1795,517 @@ Response:
 }
 ```
 
-Error 422: saldo tidak cukup / validasi gagal.
-
-#### GET /withdrawals
-
-Riwayat penarikan. Pagination standard.
-
-### 8.9 Support Tickets
-
-**Base:** `/api/v2/merchant/support/tickets` · **Middleware:** `auth:merchant_api`
-
-```text
-GET  /tickets
-POST /tickets
-GET  /tickets/{id}
-POST /tickets/{id}/messages
-```
-
-> ⚠️ Controller: `App\Http\Controllers\Api\Admin\Support\TicketController` (namespace legacy, dipakai bersama merchant & customer).
-
-## 9. Admin Endpoints
-
-**Base:** `/api/v2/admin/marketplace` · **Middleware:** `throttle:120,1` + `auth:admin_api` + `admin`
-
-| Resource | CRUD | Extra |
-|---|---|---|
-| Products | ✅ | stats, images, toggle-active, toggle-featured |
-| Categories | ✅ | tree, toggle-active, stats |
-| Orders | ✅ | mark-paid, mark-completed, ship, update-status, stats, trends |
-| Reviews | ✅ | stats |
-| Shipping Methods | ✅ | active/list, toggle-active |
-| Stores | ✅ | set-default, toggle-active, stats |
-| Merchants | R/U | verify, products, orders |
-
-## 10. Payment Integration (Flip)
-
-### 10.1 Konfigurasi
-
-`config/services.php`:
-
-```php
-'flip' => [
-    'api_key'                   => env('FLIP_API_KEY'),
-    'webhook_token'             => env('FLIP_WEBHOOK_TOKEN'),
-    'validation_token'          => env('FLIP_VALIDATION_TOKEN', env('FLIP_WEBHOOK_TOKEN')),
-    'base_url'                  => env('FLIP_BASE_URL', 'https://bigflip.id/big_sandbox_api'),
-    'sandbox_mode'              => env('FLIP_SANDBOX', true),
-    'timeout'                   => env('FLIP_TIMEOUT', 15),
-    'default_expiry_minutes'    => env('FLIP_DEFAULT_EXPIRY_MINUTES', 30),
-    'skip_signature_validation' => env('FLIP_SKIP_SIGNATURE', false),
-],
-```
-
-`config/flip.php`:
-
-```php
-'pwf_api_version' => env('FLIP_PWF_API_VERSION', 'v2'),
-```
-
-### 10.2 Environment
-
-| Mode | Base URL | API Version |
-|---|---|---|
-| Sandbox | https://bigflip.id/big_sandbox_api | v2 |
-| Production | https://bigflip.id/api | v3 |
-
-> ⚠️ Saat ini sandbox — live masih proses verifikasi.
-
-### 10.3 Central Booking
-
-Enum `service_type`: `hotel` | `kuliner` | `rental` | `destinasi` | `tour` | `event` | `mice` | `transport` | `marketplace`
-
-Enum `payment_status`: `unpaid` | `pending` | `paid` | `refunded` | `expired` | `cancelled`
-
-### 10.4 Payment Flow (Fase 6 — Auto Trigger)
-
-**Entry point utama:** `POST /customer/orders` (bukan lagi manual ke `/payment/process`)
-
-```text
-1. Customer checkout → POST /customer/orders
-   ├─ Buat SouvenirOrder (pending, unpaid)
-   ├─ Reserve stock (atomic decrement)
-   ├─ AUTO trigger PaymentService::processPayment():
-   │   ├─ syncCentralBooking() (dengan user_id)
-   │   ├─ FlipPaymentService::createBillFromPayable()
-   │   │   └─ HTTP POST ke Flip → bill_id + payment_url
-   │   ├─ Set flip_bill_id di SouvenirOrder
-   │   └─ Update CentralBooking via flip_bill_id
-   ├─ Observer::updated() trigger orderCreated($order, $paymentUrl)
-   │   ├─ 📧 Email + tombol Bayar
-   │   └─ 📱 WA + link bayar
-   └─ Response 201 dengan payment_url
-
-2. Customer klik tombol dari email → bayar di Flip
-
-3. Webhook Flip: POST /api/webhook/flip
-   ├─ validateSignature (HMAC SHA256)
-   ├─ FlipTransaction.markAsPaid()
-   ├─ SouvenirOrder.markAsPaid()
-   └─ MarketplaceNotificationService::orderPaid()
-       ├─ 📧 Email "Pembayaran Berhasil"
-       └─ 📱 WA "Pembayaran Berhasil"
-```
-
-Endpoint `POST /customer/payment/process` tetap ada — untuk retry/manual kalau auto-payment gagal.
-
-### 10.5 Webhook Flip
-
-**Endpoint:** `POST /api/webhook/flip`
-
-**Header:** `X-Callback-Signature: HMAC-SHA256(raw_body, validation_token)`
-
-Payload (flat):
+Response 422 — Saldo tidak cukup:
 
 ```json
 {
-  "id": 362438,
-  "bill_id": 362438,
-  "status": "SUCCESSFUL",
-  "amount": 135000,
-  "reference_id": "SO-20261008-XXXXXXXX",
-  "sender_bank": "bca",
-  "sender_name": "Budi",
-  "payment_method": "bank_transfer",
-  "paid_at": "2026-10-08 10:30:00"
+  "status": false,
+  "message": "Validasi gagal.",
+  "errors": {
+    "amount": ["Saldo tidak mencukupi. Saldo Anda: Rp 30.000"]
+  }
 }
 ```
 
-Status didukung:
+### 12.3 GET /merchant/withdrawals
 
-| Status | Handler |
-|---|---|
-| SUCCESSFUL / PAID | handlePaid() → markAsPaid + notif |
-| FAILED / CANCELLED | handleFailed() |
-| EXPIRED | handleExpired() |
-| PENDING | ignored |
+**Deskripsi:** Riwayat penarikan.
 
-**Idempotency:** Kalau sudah paid, skip processing.
+**Auth:** ✅ Bearer token
 
-**Guard v2.6:** Webhook SUCCESSFUL tidak akan mengubah order yang sudah `cancelled` menjadi `paid`.
-
-**Dev mode:** `FLIP_SKIP_SIGNATURE=true` untuk skip verifikasi. ⚠️ JANGAN di production.
-
-## 11. Shipping Integration
-
-### 11.1 Shipping Methods
-
-Tabel `souvenir_shipping_methods` — metode manual yang di-set admin. Field: `name`, `courier_code`, `base_cost`, `description`, `is_active`.
-
-### 11.2 Shipping Tracking
-
-Tabel `souvenir_shipping_trackings` — history tracking order. Field: `order_uuid`, `status`, `description`, `location`, `tracked_at`.
-
-### 11.3 KiriminAja Integration
-
-- `KiriminAjaService::createOrder()` — request pickup & dapat AWB
-- `KiriminAjaService::trackOrder()` — lacak by AWB
-
-### 11.4 Webhook Shipping
-
-**Endpoint:** `POST /api/webhook/shipping`
-
-Payload flexible:
+Response 200:
 
 ```json
 {
-  "awb": "JNE1234567890",
-  "status": "delivered",
-  "description": "Paket diterima",
-  "location": "Banda Aceh",
-  "tracked_at": "2026-10-08 14:00:00"
+  "status": true,
+  "data": [
+    {
+      "id": "uuid",
+      "reference": "WD-20261008-ABC123",
+      "amount": 50000,
+      "formatted_amount": "Rp 50.000",
+      "bank_name": "BCA",
+      "bank_account": "1234567890",
+      "account_name": "Budi Santoso",
+      "status": "pending",
+      "status_label": "Menunggu",
+      "notes": null,
+      "processed_at": null,
+      "completed_at": null,
+      "created_at": "2026-10-08T15:00:00.000000Z"
+    }
+  ],
+  "meta": { }
 }
 ```
 
-Behavior:
+Status withdrawal:
 
-- Insert `SouvenirShippingTracking`
-- Kalau status = `delivered` → `SouvenirOrder::markAsCompleted()`
-- Kalau status = `shipped` / `in_transit` + order status = `processing` → update ke `shipped`
+| Status | Label | Deskripsi |
+|---|---|---|
+| pending | Menunggu | Baru diajukan |
+| processed | Diproses | Sedang diproses admin |
+| completed | Selesai | Dana sudah ditransfer |
+| failed | Gagal | Transfer gagal |
 
-## 12. Order Lifecycle
+## 13. Order Lifecycle & Business Rules
 
-### 12.1 Full Flow
+### 13.1 Status Flow
 
 ```text
-1. BROWSE
-   GET /public/souvenir/products
-   GET /public/souvenir/products/{slug}
-
-2. CREATE ORDER (auto payment trigger)
-   POST /customer/orders
-   → SouvenirOrder (pending, unpaid)
-   → Reserve stock
-   → Auto trigger PaymentService → payment_url
-   → Notif: email + WA "Pesanan Diterima + tombol Bayar"
-
-3. PAYMENT (customer klik tombol dari email)
-   → Redirect ke Flip → bayar
-   → Webhook Flip: POST /webhook/flip
-   → FlipTransaction.markAsPaid()
-   → SouvenirOrder.markAsPaid()
-   → Notif: email + WA "Pembayaran Berhasil"
-
-4. MERCHANT PROCESSING
-   PUT /merchant/souvenir/orders/{uuid}/status
-   Body: { status: "processing" }
-
-5. SHIPPING
-   POST /merchant/souvenir/orders/{uuid}/ship
-   → SouvenirOrder::ship()
-   → Insert SouvenirShippingTracking
-   → Notif: email + WA "Pesanan Dikirim"
-
-6. WEBHOOK SHIPPING
-   POST /webhook/shipping
-   → Kalau delivered: markAsCompleted()
-
-7. COMPLETED
-   status=completed, completed_at=now()
-   → Notif: email + WA "Pesanan Selesai"
+pending  →  paid  →  processing  →  shipped  →  completed
+   ↓         ↓           ↓
+cancelled cancelled  cancelled
 ```
-
-### 12.2 Status Flow
 
 | Status | Deskripsi | Transisi Boleh |
 |---|---|---|
-| pending | Menunggu pembayaran | paid, cancelled |
-| paid | Sudah dibayar | processing, cancelled |
-| processing | Sedang diproses merchant | shipped, cancelled |
+| pending | Menunggu pembayaran customer | paid, cancelled |
+| paid | Sudah dibayar, siap diproses | processing, cancelled |
+| processing | Sedang disiapkan merchant | shipped, cancelled |
 | shipped | Sudah dikirim | completed |
 | completed | Selesai | — |
 | cancelled | Dibatalkan | — |
 
-> ⚠️ **v2.6:** Transisi `processing → shipped` hanya boleh lewat endpoint `/ship` atau `/ship-kiriminaja`. Bukan lewat `PUT /orders/{uuid}/status`.
+### 13.2 Aksi per Status
 
-### 12.3 Payment Status
-
-| Status | Deskripsi |
+| Status | Aksi yang Tersedia |
 |---|---|
-| unpaid | Belum dibayar |
-| paid | Sudah dibayar |
-| failed | Gagal |
-| refunded | Dikembalikan |
+| pending | Tidak ada — tunggu customer bayar |
+| paid | Update ke processing, atau cancelled |
+| processing | Kirim (`/ship` atau `/ship-kiriminaja`), atau cancelled |
+| shipped | Lacak (`/track`), atau completed |
+| completed | Lihat detail, tidak ada aksi |
+| cancelled | Lihat detail, tidak ada aksi |
 
-## 13. Notification
+### 13.3 Aturan Kontak Customer (PENTING)
 
-### 13.1 Status
+Defense in depth — 2 layer:
+
+**Layer 1 — API (backend):**
+
+- Order `payment_status !== 'paid'`: `shipping_address = null`, `user.phone = null`, `user.email = null`, `user.name` di-mask ("Budi S.")
+- Order `payment_status === 'paid'`: full data
+
+**Layer 2 — Client (web/mobile):**
+
+- Cek `payment_status === 'paid'` sebelum render alamat
+- Kalau `!== 'paid'` → tampilkan pesan "Detail pembeli akan tersedia setelah pesanan dibayar"
+
+**Alasan:** cegah merchant hubungi customer di luar sistem (lewat WA/telepon langsung).
+
+### 13.4 Notifikasi Otomatis
+
+Backend otomatis kirim notifikasi:
 
 | Event | Email Customer | Email Merchant | WA Customer | WA Merchant |
 |---|---|---|---|---|
-| Order created | ✅ + tombol bayar | ✅ | ✅ + link bayar | ✅ (skip invalid) |
-| Order paid | ✅ | ✅ | ✅ | ✅ (skip invalid) |
+| Order created | ✅ + tombol bayar | ✅ (tanpa kontak) | ✅ + link bayar | ✅ (info dasar) |
+| Order paid | ✅ | ✅ (tanpa kontak) | ✅ | ✅ (info dasar) |
 | Order shipped | ✅ | — | ✅ | — |
 | Order completed | ✅ | — | ✅ | — |
-| Order cancelled | ✅ | ✅ | ✅ | — |
+| Order cancelled | ✅ | ✅ (info dasar) | ✅ | — |
 
-### 13.2 Service
+Merchant TIDAK perlu implement notifikasi manual — backend sudah handle via observer.
 
-| Service | Fungsi |
-|---|---|
-| MarketplaceNotificationService | Dispatcher terpusat |
-| MarketplaceOrderMail | Mailable class (terima paymentUrl) |
-| MerchantResetPasswordMail | Mailable reset password merchant |
-| SouvenirOrderObserver | Auto-trigger dari event model |
-| WhatsAppService | WA gateway multi-provider |
+### 13.5 Rate Limit Ops
 
-### 13.3 Flow
+| Endpoint | Limit | Alasan |
+|---|---|---|
+| PUT /orders/{uuid}/status | 60/menit | Cegah spam transisi |
+| POST /orders/{uuid}/ship | 60/menit | Cegah spam ship |
+| POST /withdraw | 10/menit | Cegah spam withdrawal |
 
-```text
-SouvenirOrder::create()
-    ↓
-Observer::created() → SKIP notif (tunggu payment_url)
-    ↓
-Auto PaymentService::processPayment()
-    ↓
-Set flip_bill_id → Observer::updated() detect
-    ↓
-MarketplaceNotificationService::orderCreated($order, $paymentUrl)
-    ↓
-├─ Mail::queue() → MarketplaceOrderMail → SMTP
-└─ WhatsAppService::send() → Fonnte/Wablas/Kirimwa
-    ↓
-Status PAID (via webhook) → Observer::updated() detect
-    ↓
-MarketplaceNotificationService::orderPaid()
-    ↓
-📧 + 📱 Notif "Pembayaran Berhasil"
-```
+## 14. Constants Reference
 
-### 13.4 Config Email
-
-```env
-MAIL_MAILER=smtp
-MAIL_HOST=live.smtp.mailtrap.io
-MAIL_PORT=587
-MAIL_USERNAME=api
-MAIL_PASSWORD=<mailtrap_password>
-MAIL_FROM_ADDRESS=hello@ovisito.com
-MAIL_FROM_NAME="OvisitO - See More, Smile More"
-```
-
-> ⚠️ Typo `ovisto.com` (tanpa i) ditolak Mailtrap dengan error `550 Sending from domain ovisto.com is not allowed`.
-
-### 13.5 Config WhatsApp
-
-```env
-WA_PROVIDER=fonnte
-WA_API_KEY=<token_fonnte>
-WA_API_URL=https://api.fonnte.com/send
-WA_SENDER=6281234567890
-WA_ENABLED=true
-```
-
-### 13.6 Setup Fonnte
-
-1. Daftar di https://fonnte.com
-2. Device → Add Device → scan QR pakai WA nomor sekunder
-3. Copy token dari dashboard
-4. Top-up Rp 25.000 (paket Lite) → watermark hilang + kuota 1.000 pesan/bulan
-5. Set `.env` + hapus `bootstrap/cache/config.php`
-
-#### ⚠️ Risiko & Mitigasi
-
-| Risiko | Mitigasi |
-|---|---|
-| Nomor WA banned (Fonnte = unofficial) | Pakai nomor sekunder khusus bisnis |
-| Deteksi bot di volume tinggi | Pemanasan nomor 7-14 hari |
-| Kirim massal terdeteksi spam | Set delay di Fonnte (default 5 detik) |
-| Konten promosi memicu report | Notif transaksional, bukan promosi |
-| Nomor baru kirim banyak | Batasi 50-100 pesan/hari awal |
-| Device disconnected | Cek dashboard (harus 🟢 Online) |
-
-Volume besar (> 500/hari): pertimbangkan WhatsApp Business API resmi (Twilio / Wati / Qontak) — tidak bisa banned, biaya lebih tinggi.
-
-### 13.7 Templates
-
-| Template | Path |
-|---|---|
-| Blade order marketplace | resources/views/emails/marketplace/order.blade.php |
-| Blade reset password merchant | resources/views/emails/merchant/reset-password.blade.php |
-| Mailable order | app/Mail/MarketplaceOrderMail.php |
-| Mailable reset password | app/Mail/MerchantResetPasswordMail.php |
-
-### 13.8 Queue
-
-```text
-Dev:  QUEUE_CONNECTION=sync
-Prod: QUEUE_CONNECTION=database + php artisan queue:work --tries=3
-```
-
-## 14. Models Reference
-
-### 14.1 Class List
-
-| Model | Table | PK | Route Key | Connection |
-|---|---|---|---|---|
-| SouvenirProduct | souvenir_products | UUID | slug | souvenir_sql |
-| SouvenirCategory | souvenir_categories | UUID | slug | souvenir_sql |
-| SouvenirStore | souvenir_stores | UUID | slug | souvenir_sql |
-| SouvenirStoreCategory | souvenir_store_categories | UUID | id | souvenir_sql |
-| SouvenirOrder | souvenir_orders | UUID | id | souvenir_sql |
-| SouvenirOrderItem | souvenir_order_items | UUID | id | souvenir_sql |
-| SouvenirReview | souvenir_reviews | UUID | id | souvenir_sql |
-| SouvenirShippingMethod | souvenir_shipping_methods | UUID | id | souvenir_sql |
-| SouvenirShippingTracking | souvenir_shipping_trackings | UUID | id | souvenir_sql |
-| Merchant | merchants | bigint | uuid | user |
-| MerchantWithdrawal | merchant_withdrawals | bigint | id | payment |
-
-> ⚠️ `App\Models\Marketplace\Store` deprecated — pakai `SouvenirStore`. Akan dihapus di v2.7.
-
-### 14.2 Key Relations
+### 14.1 Order Status
 
 ```php
-// SouvenirProduct
-$product->category          // belongsTo SouvenirCategory (category_id)
-$product->store             // belongsTo SouvenirStore (store_id)
-$product->merchant          // belongsTo Merchant (merchant_uuid) — cross-DB
-$product->orderItems        // hasMany SouvenirOrderItem (product_uuid)
-$product->reviews           // hasMany SouvenirReview (product_uuid)
-
-// SouvenirCategory
-$category->parent           // belongsTo SouvenirCategory (parent_id)
-$category->children         // hasMany SouvenirCategory (parent_id)
-$category->products         // hasMany SouvenirProduct (category_id)
-$category->getDescendantIds()  // BFS, unlimited level
-
-// SouvenirStore
-$store->merchant            // belongsTo Merchant (merchant_uuid) — cross-DB
-$store->products            // hasMany SouvenirProduct (store_id)
-$store->categories          // belongsToMany SouvenirCategory via souvenir_store_categories
-$store->storeCategories     // hasMany SouvenirStoreCategory
-
-// SouvenirOrder
-$order->user                // belongsTo User (user_uuid) — cross-DB
-$order->merchant            // belongsTo Merchant (merchant_uuid) — cross-DB
-$order->items               // hasMany SouvenirOrderItem (order_uuid)
-$order->shippingTrackings   // hasMany SouvenirShippingTracking (order_uuid)
-$order->flipTransactions    // (stub) → FlipTransaction via bill_id
-
-// SouvenirOrderItem
-$item->order                // belongsTo SouvenirOrder (order_uuid)
-$item->product              // belongsTo SouvenirProduct (product_uuid)
-
-// SouvenirReview
-$review->product            // belongsTo SouvenirProduct (product_uuid)
-$review->user               // belongsTo User (user_uuid) — cross-DB
-$review->orderItem          // belongsTo SouvenirOrderItem (order_item_uuid)
-
-// SouvenirShippingTracking
-$tracking->order            // belongsTo SouvenirOrder (order_uuid)
-```
-
-### 14.3 Business Methods — SouvenirOrder
-
-```php
-// Status checks
-$order->isPending()         // status === 'pending'
-$order->isPaid()            // payment_status === 'paid'
-$order->isProcessing()      // status === 'processing'
-$order->isShipped()         // status === 'shipped'
-$order->isCompleted()       // status === 'completed'
-$order->isCancelled()       // status === 'cancelled'
-
-// Permission checks
-$order->canBeCancelled()    // in [pending, paid, processing]
-$order->canBeProcessed()    // status === paid
-$order->canBeShipped()      // status === processing
-$order->canBeCompleted()    // status === shipped
-
-// Transitions (idempotent)
-$order->markAsPaid($amount)     // → paid, payment_status=paid, paid_at=now
-                                // ⚠️ Guard: skip kalau sudah cancelled
-$order->markAsProcessing()      // → processing
-                                // ⚠️ Guard: skip kalau cancelled/completed
-$order->ship($courier, $tracking, $note, $shippingOrderId)
-                                // → shipped + insert tracking log
-$order->markAsShipped($courier, $tracking, $note)
-                                // ⭐ v2.6: shipped TANPA insert tracking
-                                // Untuk admin & webhook shipping
-$order->markAsCompleted()       // → completed
-                                // ⚠️ Guard: skip kalau cancelled
-$order->cancel($reason, $safe = false)
-                                // → cancelled, restore stock
-                                // $safe = true → pakai cancelSafely()
-$order->cancelSafely($reason)   // → cancelled dengan row-lock
-                                // Khusus merchant (cegah double-cancel)
-```
-
-### 14.4 Accessors & Appends
-
-```php
-// SouvenirOrder
-$order->formatted_total         // "Rp 135.000"
-$order->formatted_shipping_cost // "Rp 15.000"
-$order->grand_total             // (float) total_amount
-$order->status_label            // "Menunggu Pembayaran", "Dibayar", dll
-$order->status_badge_class      // "bg-yellow-100 text-yellow-800", dll
-$order->payment_status_label    // "Menunggu Pembayaran", "Dibayar", dll
-$order->payment_method_label    // ⭐ v2.6: "QRIS", "Transfer Bank", dll
-
-// SouvenirProduct
-$product->final_price           // ⭐ v2.6: auto-append ke JSON
-                                // discount_price jika < price, else price
-
-// SouvenirOrderItem
-$item->formatted_price          // "Rp 50.000"
-$item->formatted_subtotal       // "Rp 100.000"
-
-// SouvenirStore
-$store->category_ids            // array UUID (auto-append)
-```
-
-## 15. Constants Reference
-
-### 15.1 SouvenirOrder
-
-```php
-// Status pesanan
 SouvenirOrder::STATUS_PENDING    = 'pending'
 SouvenirOrder::STATUS_PAID       = 'paid'
 SouvenirOrder::STATUS_PROCESSING = 'processing'
 SouvenirOrder::STATUS_SHIPPED    = 'shipped'
 SouvenirOrder::STATUS_COMPLETED  = 'completed'
 SouvenirOrder::STATUS_CANCELLED  = 'cancelled'
+```
 
-// Status pembayaran
+### 14.2 Payment Status
+
+```php
 SouvenirOrder::PAYMENT_UNPAID   = 'unpaid'
 SouvenirOrder::PAYMENT_PAID     = 'paid'
 SouvenirOrder::PAYMENT_FAILED   = 'failed'
 SouvenirOrder::PAYMENT_REFUNDED = 'refunded'
-
-// Alias legacy
-SouvenirOrder::PAYMENT_PENDING = 'unpaid'
 ```
 
-### 15.2 CentralBooking
+### 14.3 Merchant Status
 
 ```php
-// Service type (enum DB)
-CentralBooking::SERVICE_HOTEL       = 'hotel'
-CentralBooking::SERVICE_DESTINASI   = 'destinasi'
-CentralBooking::SERVICE_TOUR        = 'tour'
-CentralBooking::SERVICE_KULINER     = 'kuliner'
-CentralBooking::SERVICE_RENTAL      = 'rental'
-CentralBooking::SERVICE_EVENT       = 'event'
-CentralBooking::SERVICE_MICE        = 'mice'
-CentralBooking::SERVICE_TRANSPORT   = 'transport'
-CentralBooking::SERVICE_MARKETPLACE = 'marketplace'
-
-// Payment status (enum DB)
-CentralBooking::PAYMENT_UNPAID    = 'unpaid'
-CentralBooking::PAYMENT_PENDING   = 'pending'
-CentralBooking::PAYMENT_PAID      = 'paid'
-CentralBooking::PAYMENT_REFUNDED  = 'refunded'
-CentralBooking::PAYMENT_EXPIRED   = 'expired'
-CentralBooking::PAYMENT_CANCELLED = 'cancelled'
+Merchant::STATUS_PENDING   = 'pending'    // Menunggu persetujuan admin
+Merchant::STATUS_ACTIVE    = 'active'     // Aktif
+Merchant::STATUS_SUSPENDED = 'suspended'  // Ditangguhkan
+Merchant::STATUS_INACTIVE  = 'inactive'   // Tidak aktif
 ```
 
-### 15.3 FlipTransaction
+### 14.4 Business Types
 
 ```php
-FlipTransaction::STATUS_PENDING   = 'PENDING'
-FlipTransaction::STATUS_PAID      = 'PAID'
-FlipTransaction::STATUS_EXPIRED   = 'EXPIRED'
-FlipTransaction::STATUS_FAILED    = 'FAILED'
-FlipTransaction::STATUS_CANCELLED = 'CANCELLED'
+'hotel'     => 'Hotel & Penginapan'
+'kuliner'   => 'Kuliner & Restoran'
+'rental'    => 'Rental Kendaraan & Perlengkapan'
+'tour'      => 'Paket Wisata'
+'destinasi' => 'Destinasi Wisata'
+'souvenir'  => 'Souvenir & Oleh-oleh'   // ← Merchant marketplace
 ```
 
-## 16. Roadmap & Known Issues
+### 14.5 Business Modules (per business_type)
 
-### ✅ Selesai
+```php
+'hotel'     => ['hotel', 'wisata']
+'kuliner'   => ['kuliner']
+'rental'    => ['rental']
+'tour'      => ['tour', 'wisata']
+'destinasi' => ['destinasi', 'wisata']
+'souvenir'  => ['marketplace', 'souvenir']   // ← Fokus merchant.ovisito.com
+```
 
-#### v2.6 — Backend Audit & Fix
+### 14.6 Withdrawal Status
 
-- ☑ Fix guard `$request->user('merchant')` → `$request->user()`
-- ☑ Fix `markAsShipped()` undefined di merchant order controller
-- ☑ Fix `formatted_status` → `status_label` di dashboard
-- ☑ Fix `forgotPassword` — benar-benar kirim email reset
-- ☑ Fix `changePassword` double hash (pakai `Hash::make` manual)
-- ☑ Fix `resetPassword` — jangan double hash
-- ☑ Fix slug generation race condition di StoreController
-- ☑ Fix `orWhere` tanpa grouping di CategoryController
-- ☑ Fix UNION lintas-DB di TransactionController
-- ☑ Standardisasi response `status: true/false` (bukan `'success'/'error'`)
-- ☑ Standardisasi pagination `data[]` + `meta{}`
-- ☑ Tambah guard `isCancelled()` di `markAsPaid()` & `markAsCompleted()`
-- ☑ Tambah `markAsShipped()` (admin & webhook)
-- ☑ Tambah opsi `cancel($reason, $safe)` untuk row-lock
-- ☑ Tambah accessor `payment_method_label`
-- ☑ Tambah `final_price` ke appends SouvenirProduct
-- ☑ Tambah helper `generateUniqueSlug()` dengan `withTrashed()`
-- ☑ Tambah try/catch (Throwable) + `Log::error` di semua controller merchant
-- ☑ Tambah `MerchantResetPasswordMail` + blade template
-- ☑ SQL migration: cleanup slug kosong + unique constraint + index performa
-- ☑ Deprecate `Store.php` (duplicate dari SouvenirStore)
+```php
+MerchantWithdrawal::STATUS_PENDING   = 'pending'
+MerchantWithdrawal::STATUS_PROCESSED = 'processed'
+MerchantWithdrawal::STATUS_COMPLETED = 'completed'
+MerchantWithdrawal::STATUS_FAILED    = 'failed'
+```
 
-#### v2.5 — Auto trigger + tombol bayar
+### 14.7 Courier Codes (KiriminAja)
 
-- ☑ `CustomerOrderController::store()` auto-trigger payment
-- ☑ `SouvenirOrderObserver` trigger notif saat `flip_bill_id` changed
-- ☑ Email "Pesanan Diterima + 💳 Bayar Sekarang →"
-- ☑ WA "Pesanan Diterima + Link Bayar"
+```text
+jne, jnt, sicepat, pos, anteraja
+```
 
-#### v2.4 — WA Fonnte
+## 15. Integration Guide per Platform
 
-- ☑ WhatsAppService integration
-- ☑ Config `WA_ENABLED=true`
-- ☑ Resolve customer phone dari `shipping_address`
+### 15.1 Web (Laravel Blade)
 
-#### v2.3 — Webhook Flip
+Pattern:
 
-- ☑ `FlipPaymentService::handleWebhookCallback()` support flat & nested
-- ☑ `syncCentralBooking()` support relasi `user()`
+```text
+Browser → Laravel FE (SSR) → API → Response
+         ↓
+       Session (server-side)
+```
 
-### 🔴 Known Issues
+Contoh request dari FE:
 
-#### Critical
+```php
+$response = Http::withHeaders([
+    'Authorization'   => 'Bearer ' . Session::get('merchant_token'),
+    'X-Client-ID'     => config('app.client_id'),
+    'X-Client-Secret' => config('app.client_secret'),
+    'Accept'          => 'application/json',
+])->get(config('app.api_base_url') . '/merchant/dashboard');
+```
 
-- □ Frontend `ovisito.com/orders/{order_number}` belum ada → link "Lihat Pesanan" di email 404. **Fix cepat:** arahkan ke `/user/orders`. **Fix ideal:** buat halaman detail order di frontend.
-- □ `FLIP_SKIP_SIGNATURE=true` masih aktif — wajib `false` untuk production
-- □ Typo `ovisto.com` di `.env` / `config/mail.php` — fix ke `ovisito.com`
-- □ Live mode Flip — masih proses verifikasi (sandbox aktif)
+**Token storage:** server-side session (bukan localStorage).
 
-#### Backend
+**Keuntungan:** tidak ada CORS, tidak expose token ke JS.
 
-- □ Transport observer — nama model tidak konsisten
-- □ Hotel observer — perlu test
-- □ Queue async — ganti `QUEUE_CONNECTION=sync` → `database`
-- □ Cleanup route debug — hapus `/debug-wa` + `/test-wa`
-- □ `MerchantWithdrawal.merchant_id` isi UUID — sebaiknya rename jadi `merchant_uuid` (breaking)
-- □ Method `uploadImages` & `deleteImage` di SouvenirProductController — route belum terdaftar
-- □ Method `show`, `parents`, `children` di CategoryController — route belum terdaftar
-- □ Hapus `Store.php` (deprecated) di v2.7
-- □ Hapus `SouvenirStoreController.php` (dead code) di v2.7
+### 15.2 Android (Kotlin + Retrofit)
 
-#### Database
+Setup Retrofit:
 
-- □ Unique constraint `(merchant_uuid, is_default)` via generated column — sudah SQL migration
-- □ Cek index performa setelah migration
+```kotlin
+interface MerchantApi {
+    @POST("merchant/login")
+    suspend fun login(@Body req: LoginRequest): ApiResponse<LoginData>
 
-#### Frontend Merchant TODO (merchant.ovisito.com)
+    @GET("merchant/souvenir/orders")
+    suspend fun getOrders(
+        @Query("status") status: String? = null,
+        @Query("page") page: Int = 1,
+        @Query("per_page") perPage: Int = 15,
+    ): ApiResponse<List<Order>>
 
-- □ Halaman login + register
-- □ Halaman dashboard (summary, chart, recent orders)
-- □ Halaman produk (list, create, edit, upload image)
-- □ Halaman order (list, detail, update status, ship)
-- □ Halaman store (create, edit)
-- □ Halaman transaksi & withdraw
-- □ Halaman profil & change password
-- □ Halaman support tickets
+    @PUT("merchant/souvenir/orders/{uuid}/status")
+    suspend fun updateStatus(
+        @Path("uuid") uuid: String,
+        @Body req: UpdateStatusRequest,
+    ): ApiResponse<Order>
+}
+```
 
-#### Frontend Customer TODO
+Interceptor untuk token + headers:
 
-- □ Halaman checkout — panggil `POST /customer/orders` → redirect ke `payment_url`
-- □ Halaman callback — terima redirect dari Flip → polling status
-- □ Halaman detail order — `/orders/{order_number}`
-- □ Halaman my orders — list order dengan status badge
-- □ Polling status — refresh tiap 30 detik
+```kotlin
+class AuthInterceptor(private val tokenStorage: TokenStorage) : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val builder = chain.request().newBuilder()
+            .addHeader("X-Client-ID", BuildConfig.CLIENT_ID)
+            .addHeader("X-Client-Secret", BuildConfig.CLIENT_SECRET)
+            .addHeader("Accept", "application/json")
 
-### 📊 Endpoint Verification
+        tokenStorage.getToken()?.let {
+            builder.addHeader("Authorization", "Bearer $it")
+        }
 
-**Public Catalog:**
+        return chain.proceed(builder.build())
+    }
+}
+```
 
-- ✅ GET /public/souvenir/products
-- ✅ GET /public/souvenir/products/{slug}
-- ✅ GET /public/souvenir/featured
-- ✅ GET /public/souvenir/categories
-- ✅ GET /public/souvenir/categories/{slug}
-- ✅ GET /public/souvenir/stores
-- ✅ GET /public/souvenir/stores/{slug}
-- ✅ GET /public/souvenir/shipping-methods
-- ⏸️ POST /public/souvenir/shipping-methods/calculate
+Token storage — EncryptedSharedPreferences:
 
-**Customer:**
+```kotlin
+val masterKey = MasterKey.Builder(context)
+    .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+    .build()
 
-- ✅ POST /customer/orders
-- ✅ GET /customer/orders
-- ✅ GET /customer/orders/{order_number}
-- ✅ POST /customer/orders/{order_number}/cancel
-- ✅ GET /customer/orders/{order_number}/track
-- ⏸️ POST /customer/payment/process
+val sharedPrefs = EncryptedSharedPreferences.create(
+    context,
+    "merchant_secure_prefs",
+    masterKey,
+    EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+    EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+)
+```
 
-**Merchant** — verifikasi setelah fix v2.6:
+> ⚠️ **Android security:**
+>
+> - Jangan hardcode `CLIENT_SECRET` di source code — pakai `local.properties` (exclude dari git)
+> - Atau lebih aman: backend proxy endpoint (roadmap v2.7)
+> - Aktifkan certificate pinning untuk production
 
-- ⏳ POST /merchant/register
-- ⏳ POST /merchant/login
-- ⏳ GET /merchant/dashboard
-- ⏳ GET/POST/PUT /merchant/store
-- ⏳ GET/POST/PUT/DELETE /merchant/souvenir/products
-- ⏳ GET/PUT /merchant/souvenir/orders
-- ⏳ POST /merchant/souvenir/orders/{uuid}/ship
-- ⏳ GET /merchant/transactions
-- ⏳ POST /merchant/withdraw
+### 15.3 iOS (Swift + URLSession)
 
-**Webhook:**
+Setup URLSession:
 
-- ✅ POST /webhook/flip
-- ✅ POST /webhook/shipping
+```swift
+class APIClient {
+    static let shared = APIClient()
+    private let baseURL = "https://api.ovisito.com/api/v2"
+
+    func request<T: Decodable>(
+        _ endpoint: String,
+        method: String = "GET",
+        body: [String: Any]? = nil
+    ) async throws -> T {
+        var request = URLRequest(url: URL(string: "\(baseURL)/\(endpoint)")!)
+        request.httpMethod = method
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(Config.clientID, forHTTPHeaderField: "X-Client-ID")
+        request.setValue(Config.clientSecret, forHTTPHeaderField: "X-Client-Secret")
+
+        if let token = KeychainService.getToken() {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        if let body = body {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        }
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        // Handle status, decode, dll
+    }
+}
+```
+
+Token storage — Keychain:
+
+```swift
+import Security
+
+enum KeychainService {
+    static func save(token: String) {
+        let data = token.data(using: .utf8)!
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: "merchant_token",
+            kSecValueData as String: data,
+        ]
+        SecItemDelete(query as CFDictionary)
+        SecItemAdd(query as CFDictionary, nil)
+    }
+
+    static func getToken() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: "merchant_token",
+            kSecReturnData as String: true,
+        ]
+        var result: AnyObject?
+        SecItemCopyMatching(query as CFDictionary, &result)
+        guard let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func deleteToken() {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: "merchant_token",
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+}
+```
+
+> ⚠️ **iOS security:**
+>
+> - Jangan hardcode `clientSecret` — pakai `.xcconfig` (exclude dari git)
+> - Aktifkan App Transport Security + certificate pinning untuk production
+
+## 16. Sample Flows (End-to-End)
+
+### 16.1 Flow: Register → Verify → Login
+
+```text
+1. Client → POST /merchant/register
+   Body: { name, email, password, phone, business_name, business_type, ... }
+   ← Response 201: { status: true, data: { uuid, email } }
+
+2. Client tampilkan layar "Cek email"
+
+3. User buka email → klik link verifikasi
+   GET /merchant/verify-email/{uuid}?hash=<sha1_email>
+   ← Response 200: { status: true, message: "Email berhasil diverifikasi." }
+
+4. Client → POST /merchant/login
+   Body: { email, password, device_name }
+   ← Response 200: { status: true, data: { token, merchant: {...} } }
+
+5. Client simpan token + merchant data
+6. Client → halaman Dashboard
+```
+
+### 16.2 Flow: Setup Store → Product
+
+```text
+1. Client → GET /merchant/store
+   ← Response 404: belum punya toko
+
+2. Client → GET /merchant/souvenir/categories
+   ← Response: kategori tree (untuk form)
+
+3. User isi form toko
+4. Client → POST /merchant/store (multipart)
+   Body: { name, address, phone, category_ids[], logo }
+   ← Response 201: { status: true, data: {...} }
+
+5. Client → POST /merchant/souvenir/products (multipart)
+   Body: { name, price, stock, category_id, images[] }
+   ← Response 201: { status: true, data: {...} }
+
+6. Client → GET /merchant/souvenir/products
+   ← List produk
+```
+
+### 16.3 Flow: Handle Order
+
+```text
+1. (Customer bayar pesanan → webhook Flip)
+2. Backend update order → status=paid
+3. Notifikasi otomatis terkirim
+
+4. Client → GET /merchant/souvenir/orders?status=paid
+   ← List order baru
+   ← Karena sudah paid: shipping_address + kontak customer tampil lengkap
+     (untuk order belum paid, field tersebut null — lihat §11.1)
+
+5. Merchant klik detail → GET /merchant/souvenir/orders/{uuid}
+   ← Data lengkap + kontak customer
+
+6. Merchant proses → PUT /merchant/souvenir/orders/{uuid}/status
+   Body: { status: "processing" }
+   ← Response 200
+
+7. Merchant siapkan barang, kirim manual
+   POST /merchant/souvenir/orders/{uuid}/ship
+   Body: { tracking_number, courier }
+   ← Response 200: { status: "shipped" }
+
+   ATAU via KiriminAja:
+   POST /merchant/souvenir/orders/{uuid}/ship-kiriminaja
+   Body: { sender_*, recipient_*, courier_code, ... }
+   ← Response 200: { data: { order, shipping } }
+
+8. Webhook shipping (dari kurir) → status delivered
+   → Backend update otomatis → status=completed
+
+9. Client → GET /merchant/souvenir/orders/{uuid}/track
+   ← Riwayat tracking lengkap
+```
+
+### 16.4 Flow: Withdraw
+
+```text
+1. Client → GET /merchant/dashboard
+   ← summary.balance: 150000
+
+2. Client → GET /merchant/transactions
+   ← Riwayat transaksi (order + withdrawal)
+
+3. User isi form withdraw
+4. Client → POST /merchant/withdraw
+   Body: { amount, bank_name, bank_account, account_name }
+   ← Response 200: {
+     data: {
+       withdrawal_id: "uuid",
+       reference: "WD-20261008-ABC123",
+       balance_after: 100000,
+     }
+   }
+
+5. Client refresh balance
+   GET /merchant/dashboard
+   ← summary.balance: 100000
+```
 
 ## 17. Changelog
 
 ### v2.6 — 2026-10-08
 
-**Fokus:** Backend audit + fix bug kritis + standardisasi response merchant.
-
 **Breaking Changes:**
 
-- Response `status` field di SouvenirProductController sekarang boolean (`true`/`false`), bukan `'success'`/`'error'`
-- Pagination format di semua merchant list endpoint: `data[]` + `meta{}`
-- `PUT /merchant/souvenir/orders/{uuid}/status` — status `shipped` ditolak, harus lewat `/ship` atau `/ship-kiriminaja`
-- SouvenirProduct sekarang append `final_price` di JSON (additive, tapi strict schema bisa break)
-- Middleware docs: `auth:merchant` → `auth:merchant_api`
-
-**Fixes:**
-
-- MerchantAuthController: `forgotPassword` benar-benar kirim email; `changePassword` fix double hash
-- MerchantProfileController: fix double hash di `changePassword`; handle upload file logo
-- StoreController: fix slug race condition pakai `generateUniqueSlug()` + `lockForUpdate()`
-- StoreController@update: field yang di-null-kan sekarang benar terupdate
-- CategoryController@show: `orWhere` grouping fix
-- TransactionController: fix UNION lintas-DB; format pagination
-- SouvenirOrderController@updateStatus: hapus case `'shipped'` (method undefined)
-- DashboardController: `formatted_status` → `status_label`
-- `SouvenirOrder::markAsPaid()`: guard terhadap status cancelled
-- `SouvenirOrder::markAsCompleted()`: guard terhadap status cancelled
-- SouvenirProductController: konsisten `status: true/false`
+- Response `status` field sekarang boolean (`true`/`false`), bukan `'success'`/`'error'`
+- Pagination format: `data[]` + `meta{}`
+- `PUT /orders/{uuid}/status` tidak menerima `shipped` — wajib via `/ship`
+- Filter customer data: `shipping_address`, `phone`, `email` di-null-kan untuk order belum paid
 
 **Additions:**
 
-- `SouvenirOrder::markAsShipped()` — untuk admin & webhook shipping
-- `SouvenirOrder::cancel($reason, $safe = false)` — opsi row-lock
-- `SouvenirProduct::final_price` accessor + appends
-- `SouvenirOrder::payment_method_label` accessor
-- `SouvenirStore::generateUniqueSlug()` — helper
-- `MerchantResetPasswordMail` + blade template
-- Scopes: `paymentUnpaid`, `paymentFailed`, `paymentRefunded`
-- SQL migration: cleanup slug + unique constraint + index
+- Endpoint `POST/DELETE /products/{id}/images`
+- Response `user.name` di-mask ("Budi S.") untuk order belum paid
+- Accessor `payment_method_label`, `final_price`
+- Notifikasi merchant email di setiap event
 
-**Deprecated:**
+**Fixes:**
 
-- `App\Models\Marketplace\Store` — pakai `SouvenirStore`
+- Auth guard: `auth:merchant_api` (bukan `merchant`)
+- `forgotPassword` — benar-benar kirim email
+- `changePassword` — fix double hash bug
+- Store slug race condition
+- Category `orWhere` grouping
+- Transaction UNION cross-DB
 
 ### v2.5 — 2026-10-08
 
-**Fokus:** Auto trigger payment + email/WA tombol bayar.
-
-Additions:
-
-- `SouvenirOrderObserver` trigger notif saat `flip_bill_id` changed
-- Email "Pesanan Diterima" + tombol "💳 Bayar Sekarang →"
-- WA "Pesanan Diterima" + link bayar
-- Fallback notif tanpa `payment_url` kalau auto-payment gagal
-
-Breaking Changes:
-
-- `POST /customer/orders` auto-panggil Flip → response include `payment_url` + `flip_bill_id`
-
-### v2.4 — 2026-10-08
-
-**Fokus:** Aktivasi WA Fonnte.
-
-- Fix: `resolveCustomerPhone()` — prioritas `shipping_address.phone` > `user.phone`
-- Fix: skip WA kalau nomor < 10 digit
-- Add: WA notif aktif via Fonnte
-- Add: risiko & mitigasi WA gateway
-
-### v2.3 — 2026-10-08
-
-**Fokus:** Webhook Flip + integrasi WA dasar.
-
-- Fix: `FlipPaymentService::handleWebhookCallback()` — support payload flat & nested
-- Fix: `handleWebhook()` — method baru (wrapper)
-- Fix: `syncCentralBooking()` — support relasi `user()`
+- Auto trigger payment + email/WA tombol bayar
+- WA Fonnte aktif
 
 ### v2.2 — 2026-10-08
 
-- Refactor multi-database
-- Fix payment pipeline
-- SouvenirOrder implements PayableBooking
-- Multi-DB: marketplace → `souvenir_sql`
+- Multi-database refactor
 
 ### v2.1 — 2026-10-07
 
-- Dokumentasi awal marketplace API
+- Dokumentasi awal
 
-## 18. Referensi
+## Kontak & Support
 
-- Flip API Docs
-- KiriminAja Docs
-- RajaOngkir Docs
-- Mailtrap
-- Fonnte WA Gateway
-- Laravel Sanctum
-- Laravel Eloquent Relationships
+- **Backend Team:** backend@ovisito.com
+- **API Status:** https://api.ovisito.com/api/v2/ping
+- **Health Check:** https://api.ovisito.com/up
 
 ---
 
